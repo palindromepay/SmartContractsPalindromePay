@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract USDT is ERC20 {
+constructor(
+    string memory name_,
+    string memory symbol_,
+    uint256 initialSupply
+) ERC20(name_, symbol_) {
+    _mint(msg.sender, initialSupply * 3); // Owner gets everything to redistribute in tests
+}
+// Set decimals to 6, like official USDT
+function decimals() public pure override returns (uint8) {
+    return 6;
+}
+}
