@@ -1,12 +1,11 @@
-import {
-    createPublicClient,
-    createWalletClient,
-    http,
-} from "viem";
+import { createPublicClient, createWalletClient, http, WalletClient, Account } from "viem";
 import { hardhat } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "fs";
-import type { Address } from "viem";
+
+// --- Config ---
+const RPC_URL = "http://127.0.0.1:8545";
+const DEPLOYER_KEY = "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
 // --- Load contract artifacts ---
 function loadArtifact(path: string) {
@@ -15,59 +14,58 @@ function loadArtifact(path: string) {
 const EscrowArtifact = loadArtifact("./artifacts/contracts/PalindromeCryptoEscrow.sol/PalindromeCryptoEscrow.json");
 const USDTArtifact = loadArtifact("./artifacts/contracts/USDT.sol/USDT.json");
 
+// --- Clients ---
 const publicClient = createPublicClient({
     chain: hardhat,
-    transport: http("http://127.0.0.1:8545"),
+    transport: http(RPC_URL),
 });
 
-// --- Simple deploy helper ---
+// --- General deploy helper ---
 async function deployContract(
-    walletClient: any,
-    { abi, bytecode, args = [] }: { abi: any; bytecode: string; args?: any[] }
+    client: WalletClient,
+    account: Account, // explicitly pass the account
+    { abi, bytecode, args = [] }: { abi: any; bytecode: `0x${string}`; args?: any[] }
 ) {
-    const hash = await walletClient.deployContract({
+    const hash = await client.deployContract({
         abi,
-        bytecode: bytecode as `0x${string}`,
+        bytecode,
         args,
+        account,      // Required by Viem for the signer
+        chain: hardhat, // Specify chain for context
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    return { address: receipt.contractAddress as `0x${string}` };
+    if (!receipt.contractAddress) throw new Error("Deployment failed: No contract address in receipt.");
+    return receipt.contractAddress as `0x${string}`;
 }
 
 async function main() {
-    const DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const deployerAccount = privateKeyToAccount(DEPLOYER_KEY);
-
     const deployerClient = createWalletClient({
         chain: hardhat,
-        transport: http(),
+        transport: http(RPC_URL),
         account: deployerAccount,
     });
 
     // --- Deploy USDT (name, symbol, initialSupply) ---
-    const USDT_INITIAL_SUPPLY = 10_000_000 * 1_000_000; // 10M USDT * 10^6 (6 decimals)
-    const usdt = await deployContract(deployerClient, {
+    const USDT_INITIAL_SUPPLY = 10_000_000 * 1_000_000; // 10M USDT, 6 decimals
+    const usdtAddress = await deployContract(deployerClient, deployerAccount, {
         abi: USDTArtifact.abi,
-        bytecode: USDTArtifact.bytecode,
+        bytecode: USDTArtifact.bytecode as `0x${string}`,
         args: ["Tether USD", "USDT", USDT_INITIAL_SUPPLY],
     });
-    const usdtAddress = usdt.address;
 
-    // --- Deploy Escrow contract (no constructor args) ---
-    const escrow = await deployContract(deployerClient, {
+    // --- Deploy Escrow contract, pass USDT address if required ---
+    const escrowAddress = await deployContract(deployerClient, deployerAccount, {
         abi: EscrowArtifact.abi,
-        bytecode: EscrowArtifact.bytecode,
+        bytecode: EscrowArtifact.bytecode as `0x${string}`,
+        args: [usdtAddress], // Remove or change if your contract args differ
     });
-    const escrowAddress = escrow.address;
 
-    // --- Print addresses for frontend/verification ---
-    console.log(`USDT deployed to:         ${usdtAddress}`);
+    console.log(`USDT deployed to:                 ${usdtAddress}`);
     console.log(`PalindromeCryptoEscrow deployed to: ${escrowAddress}`);
-
-    // --- Optionally, mint or transfer tokens here if needed, using deployerClient.writeContract ---
 }
 
 main().catch((err) => {
-    console.error(err);
+    console.error("Deployment error:", err);
     process.exit(1);
 });

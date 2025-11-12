@@ -21,18 +21,31 @@ const EscrowArtifact = loadArtifact("./artifacts/contracts/PalindromeCryptoEscro
 const USDTArtifact = loadArtifact("./artifacts/contracts/USDT.sol/USDT.json");
 
 // === Load env variables ===
-const BSCTESTNET_RPC_URL = process.env.BSCTESTNET_RPC_URL as string;
-const BSCTESTNET_PRIVATE_KEY = process.env.BSCTESTNET_PRIVATE_KEY as `0x${string}`;
-if (!BSCTESTNET_RPC_URL || !BSCTESTNET_PRIVATE_KEY) {
-    throw new Error("Set BSCTESTNET_RPC_URL and BSCTESTNET_PRIVATE_KEY in environment");
+const BSCTESTNET_RPC_URL = process.env.BSCTESTNET_RPC_URL?.trim();
+const BSCTESTNET_PRIVATE_KEY = process.env.OWNER_KEY?.trim();
+const USDT_ADDRESS = process.env.USDT_ADDRESS?.trim();
+
+if (!BSCTESTNET_RPC_URL || !BSCTESTNET_PRIVATE_KEY || !USDT_ADDRESS) {
+    throw new Error("Set BSCTESTNET_RPC_URL, OWNER_KEY, and USDT_ADDRESS in environment");
 }
 
+// Private key validation: ensures 0x prefix and length
+function validateHexKey(key: string | undefined, label: string): `0x${string}` {
+    if (!key) throw new Error(`Missing ${label}`);
+    const stripped = key.replace(/^['"]|['"]$/g, '');
+    if (!/^0x[0-9a-fA-F]{64}$/.test(stripped)) {
+        throw new Error(`Invalid format for ${label}`);
+    }
+    return stripped as `0x${string}`;
+}
+
+const privateKey = validateHexKey(BSCTESTNET_PRIVATE_KEY, "OWNER_KEY");
 // === Setup Viem clients for BSC Testnet ===
 const publicClient = createPublicClient({
     chain: bscTestnet,
     transport: http(BSCTESTNET_RPC_URL),
 });
-const deployerAccount = privateKeyToAccount(BSCTESTNET_PRIVATE_KEY);
+const deployerAccount = privateKeyToAccount(privateKey);
 const deployerClient = createWalletClient({
     chain: bscTestnet,
     transport: http(BSCTESTNET_RPC_URL),
@@ -52,8 +65,6 @@ async function deployContract(
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     console.log("Deployed at block:", receipt.blockNumber);
     return { address: receipt.contractAddress as `0x${string}`, blockNumber: receipt.blockNumber };
-
-
 }
 
 async function main() {
@@ -70,11 +81,9 @@ async function main() {
     const escrow = await deployContract(deployerClient, {
         abi: EscrowArtifact.abi,
         bytecode: EscrowArtifact.bytecode,
-        args: ["0x337610d27c682E347C9cD60BD4b3b107C9d34dDd"]
+        args: [USDT_ADDRESS]
     });
     console.log("PalindromeCryptoEscrow deployed at:", escrow.address, escrow.blockNumber);
-
-    // Add further deployment or post-deployment logic as needed
 }
 
 main().catch((err) => {

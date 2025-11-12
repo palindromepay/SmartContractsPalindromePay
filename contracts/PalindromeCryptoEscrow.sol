@@ -202,7 +202,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      */
     function withdraw(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.CANCELED || deal.state == State.COMPLETE || deal.state == State.REFUNDED, "Withdrawals only allowed after escrow ends");
+        require(deal.state == State.CANCELED || deal.state == State.COMPLETE, "Withdrawals only allowed after escrow ends");
         uint256 amount = withdrawable[deal.token][msg.sender];
         require(amount != 0, "Nothing to withdraw");
         IERC20(deal.token).safeTransfer(msg.sender, amount);
@@ -419,6 +419,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      * @dev Refunds the buyer in an escrow deal if the state is AWAITING_DELIVERY.
      * The function can only be called by the arbiter and is protected against reentrancy.
      * It updates the state to REFUNDED and emits a Refunded event.
+     * BUYER receives the tokens
      * @param escrowId The ID of the escrow deal to refund.
      */
     function refund(uint256 escrowId) external nonReentrant onlyArbiter(escrowId) {
@@ -460,6 +461,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 block.chainid,
                 address(this),
                 escrowId,
+                msg.sender, 
                 deal.buyer,
                 deal.depositTime,
                 deadline,
@@ -562,6 +564,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 block.chainid,
                 address(this),
                 escrowId,
+                msg.sender, 
                 deal.depositTime,
                 deadline,
                 nonce,
@@ -605,6 +608,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 block.chainid,
                 address(this),
                 escrowId,
+                msg.sender, 
                 deal.depositTime,
                 deadline,
                 nonce,
@@ -653,6 +657,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 block.chainid,
                 address(this),
                 escrowId,
+                msg.sender, 
                 deal.depositTime,
                 deadline,
                 nonce,
