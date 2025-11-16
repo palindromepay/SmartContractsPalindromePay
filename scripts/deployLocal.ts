@@ -12,26 +12,26 @@ function loadArtifact(path: string) {
     return JSON.parse(readFileSync(path, "utf8"));
 }
 const EscrowArtifact = loadArtifact("./artifacts/contracts/PalindromeCryptoEscrow.sol/PalindromeCryptoEscrow.json");
+const LPArtifact = loadArtifact("./artifacts/contracts/PalindromeEscrowLP.sol/PalindromeEscrowLP.json");
 const USDTArtifact = loadArtifact("./artifacts/contracts/USDT.sol/USDT.json");
 
-// --- Clients ---
+// --- Setup clients ---
 const publicClient = createPublicClient({
     chain: hardhat,
     transport: http(RPC_URL),
 });
 
-// --- General deploy helper ---
 async function deployContract(
     client: WalletClient,
-    account: Account, // explicitly pass the account
+    account: Account,
     { abi, bytecode, args = [] }: { abi: any; bytecode: `0x${string}`; args?: any[] }
 ) {
     const hash = await client.deployContract({
         abi,
         bytecode,
         args,
-        account,      // Required by Viem for the signer
-        chain: hardhat, // Specify chain for context
+        account,
+        chain: hardhat,
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     if (!receipt.contractAddress) throw new Error("Deployment failed: No contract address in receipt.");
@@ -54,15 +54,40 @@ async function main() {
         args: ["Tether USD", "USDT", USDT_INITIAL_SUPPLY],
     });
 
-    // --- Deploy Escrow contract, pass USDT address if required ---
+    // --- Deploy LP token contract ---
+    const lpAddress = await deployContract(deployerClient, deployerAccount, {
+        abi: LPArtifact.abi,
+        bytecode: LPArtifact.bytecode as `0x${string}`,
+        args: [],
+    });
+
+    // --- Deploy Escrow contract, pass LP token + USDT token as constructor args ---
     const escrowAddress = await deployContract(deployerClient, deployerAccount, {
         abi: EscrowArtifact.abi,
         bytecode: EscrowArtifact.bytecode as `0x${string}`,
-        args: [usdtAddress], // Remove or change if your contract args differ
+        args: [lpAddress, usdtAddress],
     });
 
-    console.log(`USDT deployed to:                 ${usdtAddress}`);
-    console.log(`PalindromeCryptoEscrow deployed to: ${escrowAddress}`);
+    // --- (Important) Set LP minter to Escrow contract ---
+    // Build calldata for setMinter
+    const { encodeFunctionData } = await import("viem"); // Lazy load for NodeJS
+    const setMinterCalldata = encodeFunctionData({
+        abi: LPArtifact.abi,
+        functionName: "setMinter",
+        args: [escrowAddress],
+    });
+    const setMinterHash = await deployerClient.sendTransaction({
+        to: lpAddress,
+        data: setMinterCalldata,
+        account: deployerAccount,
+        chain: hardhat,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: setMinterHash });
+
+    console.log(`USDT deployed to:             ${usdtAddress}`);
+    console.log(`LP Token deployed to:         ${lpAddress}`);
+    console.log(`PalindromeCryptoEscrow to:    ${escrowAddress}`);
+    console.log(`LP minter set to escrow:      ${escrowAddress}`);
 }
 
 main().catch((err) => {

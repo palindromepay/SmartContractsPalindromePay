@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./PalindromeEscrowLP.sol"; 
 
 
 /// @notice Secure, production-grade escrow contract for P2P crypto settlement.
@@ -17,7 +18,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     enum State { AWAITING_PAYMENT, AWAITING_DELIVERY, DISPUTED, COMPLETE, REFUNDED, CANCELED }
     enum Role { None, Buyer, Seller, Arbiter }
 
-    uint256 private constant _FEE_BPS = 100; // 1%
+    uint256 private constant _FEE_BPS = 100; //1%
+    PalindromeEscrowLP public lpToken;         
 
     struct EscrowDeal {
         address token;
@@ -39,7 +41,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     mapping(address tokenAddress => bool isAllowed) public allowedTokens;
     mapping(uint256 _disputeId => uint256 _status) public disputeStatus;
     mapping(address token => mapping(address user => uint256 amount)) public withdrawable;
-    mapping(address token => uint256 amount) public feeWithdrawable;
+    mapping(address => uint256) public feePool;   
+    address[] public protocolTokens; 
 
 
     error InvalidMessageRoleForDispute();
@@ -69,6 +72,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     event Withdrawn(address indexed token, address indexed user, uint256 amount);
     event FeeWithdrawn(address indexed token, address indexed to, uint256 amount);
     event PayoutWithFee(address indexed token, address indexed recipient, uint256 amount, uint256 fee);
+    event FeeWithdrawnAll(address indexed owner, uint256 lpBurned);
 
     /// @notice Ensures that the caller is a participant in the specified escrow
     /// @param escrowId The ID of the escrow to check participant status
@@ -110,9 +114,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     * @notice Initializes contract and sets initial allowed token.
     * @param initialAllowedToken The address of the first allowed ERC20 token.
     */
-    constructor(address initialAllowedToken) {
-        require(initialAllowedToken != address(0), "Address cannot be zero");
+    constructor(address _lpToken, address initialAllowedToken) {
+        require(_lpToken != address(0), "LP token required");
+        lpToken = PalindromeEscrowLP(_lpToken);
+        require(initialAllowedToken != address(0), "Token cannot be zero");
         allowedTokens[initialAllowedToken] = true;
+        protocolTokens.push(initialAllowedToken);
         emit TokenAllowed(initialAllowedToken, true);
     }
 
@@ -173,22 +180,21 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     }
 
     /**
-     * @notice Handles the payout with a fee deduction for a given token and recipient.
-     * @dev Handles the payout process with a fee deduction. 
-     * Calculates the fee based on the provided amount and updates the withdrawable balances.
-     * Emits a PayoutWithFee event.
-     * @param token The address of the token being paid out.
-     * @param recipient The address of the recipient.
-     * @param amount The total amount to be paid out before fee deduction.
-     * @return fee The fee deducted from the total amount.
-     */
+    * @notice Handles escrow payout with protocol fee accrual and LP minting.
+    * @dev Protocol fee is added to feePool, LP tokens are minted to the owner.
+    * @param token Token address paid.
+    * @param recipient Net payout recipient (seller/buyer).
+    * @param amount Gross payout amount.
+    * @return fee Protocol fee accrued.
+    */
     function _escrowPayoutWithFee(address token, address recipient, uint256 amount) internal returns (uint256 fee) {
         require(recipient != address(0), "Recipient address cannot be zero");
         fee = (amount * _FEE_BPS) / 10000;
         uint256 payout = amount - fee;
         require(amount != 0, "Amount must be greater than zero");
         withdrawable[token][recipient] += payout;
-        feeWithdrawable[token] = feeWithdrawable[token] + fee;
+        feePool[token] += fee;
+        lpToken.mint(owner(), fee);
         emit PayoutWithFee(token, recipient, amount, fee);
     }
 
@@ -202,7 +208,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      */
     function withdraw(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.CANCELED || deal.state == State.COMPLETE, "Withdrawals only allowed after escrow ends");
+        require(deal.state == State.CANCELED || deal.state == State.COMPLETE || deal.state == State.REFUNDED, "Withdrawals only allowed after escrow ends");
         uint256 amount = withdrawable[deal.token][msg.sender];
         require(amount != 0, "Nothing to withdraw");
         IERC20(deal.token).safeTransfer(msg.sender, amount);
@@ -210,26 +216,29 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         emit Withdrawn(deal.token, msg.sender, amount);
     }
 
-
-
     /**
-     * @notice Withdraws the accumulated fees for a specific token to a specified address.
-     * @dev Withdraws the accumulated fees for a specific token to a specified address.
-     * @param token The address of the token from which fees are to be withdrawn.
-     * @param to The address to which the withdrawn fees will be sent.
-     * Requirements:
-     * - The caller must be the contract owner.
-     * - There must be fees available to withdraw.
-     */
-    function withdrawFee(address token, address to) external nonReentrant onlyOwner {
-        require(to != address(0), "Invalid fee recipient"); // <--- Recommended addition
-        uint256 amount = feeWithdrawable[token];
-        require(amount != 0, "No fees to withdraw");
-        IERC20(token).safeTransfer(to, amount);
-        delete feeWithdrawable[token];
-        emit FeeWithdrawn(token, to, amount);
-    }
+    * @notice Owner claims all protocol fees by burning their LP tokens.
+    * @dev Automatically calculates and burns the owner's full LP balance, distributing all accrued protocol fees to owner.
+    */
+    function withdrawAllFees() external nonReentrant onlyOwner {
+        uint256 lpBurnAmount = lpToken.balanceOf(owner());
+        require(lpBurnAmount > 0, "No LP tokens to burn");
+        uint256 lpSupply = lpToken.totalSupply();
 
+        for (uint256 i = 0; i < protocolTokens.length; i++) {
+            address token = protocolTokens[i];
+            uint256 poolFee = feePool[token];
+            uint256 payout = (lpBurnAmount * poolFee) / lpSupply;
+            if (payout > 0) {
+                IERC20(token).safeTransfer(owner(), payout);
+                feePool[token] -= payout;
+                emit FeeWithdrawn(token, owner(), payout);
+            }
+        }
+        lpToken.burn(owner(), lpBurnAmount);
+        emit FeeWithdrawnAll(owner(), lpBurnAmount);
+
+    }
 
     /**
      * @notice Deposits the specified amount into the escrow for the given escrowId.
@@ -349,7 +358,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      * Changes the state of the deal to DISPUTED and emits a DisputeStarted event.
      * @param escrowId The ID of the escrow deal to dispute.
      */
-    function startDispute(uint256 escrowId) external nonReentrant onlyBuyer(escrowId) {
+    function startDispute(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         deal.state = State.DISPUTED;
@@ -397,7 +406,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     /**
      * @notice Resolves a dispute for a given escrow by setting its state to the specified resolution.
      * @dev Resolves a dispute for a given escrow by setting its state to the provided resolution.
-     * Only callable by the arbiter of the escrow. The resolution must be either COMPLETE or REFUNDED.
+     * Only callable by the arbiter of the escrow. The resolution must be either COMPLETE or REFUNDED. 
+     * If COMPLETE then Seller receives token if REFUNDED then Buyer receives token.
      * Transfers the escrow amount to the appropriate party and deletes the dispute status.
      * Emits a DisputeResolved event.
      * @param escrowId The ID of the escrow to resolve.
@@ -412,22 +422,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         delete disputeStatus[escrowId];
         deal.state = resolution;
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
-    }
-
-    /**
-     * @notice Refunds the buyer and updates the escrow state to REFUNDED
-     * @dev Refunds the buyer in an escrow deal if the state is AWAITING_DELIVERY.
-     * The function can only be called by the arbiter and is protected against reentrancy.
-     * It updates the state to REFUNDED and emits a Refunded event.
-     * BUYER receives the tokens
-     * @param escrowId The ID of the escrow deal to refund.
-     */
-    function refund(uint256 escrowId) external nonReentrant onlyArbiter(escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
-        uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
-        deal.state = State.REFUNDED;
-        emit Refunded(escrowId, msg.sender, deal.amount, fee);
     }
 
     /**
@@ -462,7 +456,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 address(this),
                 escrowId,
                 msg.sender, 
-                deal.buyer,
                 deal.depositTime,
                 deadline,
                 nonce,
@@ -487,8 +480,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      */
     function requestCancelSigned(
         uint256 escrowId,
-        uint256 deadline,
         bytes calldata signature,
+        uint256 deadline,
         uint256 nonce
     ) external nonReentrant onlyBuyerorSeller(escrowId){
         uint256 MAX_SIGNATURE_WINDOW = 1 days;
@@ -541,16 +534,16 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
      * The dispute must be started within a valid signature window and the nonce must match the current deal nonce.
      * The signer of the signature must be either the buyer or the seller.
      * @param escrowId The ID of the escrow transaction.
-     * @param deadline The deadline by which the dispute must be initiated.
      * @param signature The signature of the buyer or seller.
+     * @param deadline The deadline by which the dispute must be initiated.
      * @param nonce The current nonce of the escrow deal.
      */
     function startDisputeSigned(
         uint256 escrowId,
-        uint256 deadline,
         bytes calldata signature,
+        uint256 deadline,
         uint256 nonce
-    ) external nonReentrant onlyBuyer(escrowId){
+    ) external nonReentrant onlyBuyerorSeller(escrowId){
         uint256 MAX_SIGNATURE_WINDOW = 1 days;
         require(deadline > 0, "Invalid deadline");
         require(deadline > block.timestamp, "Deadline must be in the future");
@@ -578,51 +571,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         emit DisputeStarted(escrowId, signer);
     }
 
-    /**
-     * @notice Refunds the escrow amount to the buyer if the conditions are met and the signature is valid.
-     * @param escrowId The ID of the escrow.
-     * @param deadline The deadline for the refund to be valid.
-     * @param signature The signature to verify the refund.
-     * @param nonce The nonce to ensure the refund is unique.
-     * @dev Refunds the escrow amount to the buyer if the conditions are met.
-     * The function can only be called by the arbiter and requires a valid signature.
-     * It checks the escrow state, deadline, and nonce before proceeding with the refund.
-     * Emits a `Refunded` event upon successful refund.
-     */
-    function refundSigned(
-        uint256 escrowId,
-        uint256 deadline,
-        bytes calldata signature,
-        uint256 nonce
-    ) external nonReentrant onlyBuyer(escrowId) {
-        uint256 MAX_SIGNATURE_WINDOW = 1 days;
-        require(deadline > 0, "Invalid deadline");
-        require(deadline > block.timestamp, "Deadline must be in the future");
-        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
-        EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_PAYMENT");
-        require(nonce == deal.nonce, "Refund nonce mismatch");
-
-        bytes32 hash = keccak256(
-            abi.encode(
-                block.chainid,
-                address(this),
-                escrowId,
-                msg.sender, 
-                deal.depositTime,
-                deadline,
-                nonce,
-                "refund"
-            )
-        );
-        address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
-        require(signer == deal.arbiter, "Signature does not match arbiter");
-        deal.nonce++;
-        uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
-        deal.state = State.REFUNDED;
-        emit Refunded(escrowId, signer, deal.amount, fee);
-    }
-
     /** 
      * @notice Resolves a dispute for a given escrow by verifying the arbiter's signature and updating the escrow state.
      * @dev Resolves a dispute for a given escrow by verifying the arbiter's signature.
@@ -638,9 +586,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
 
     function resolveDisputeSigned(
         uint256 escrowId,
+        bytes calldata signature,
         State resolution,
         uint256 deadline,
-        bytes calldata signature,
         uint256 nonce
     ) external nonReentrant onlyArbiter(escrowId){
         uint256 MAX_SIGNATURE_WINDOW = 1 days;
@@ -651,7 +599,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(deal.state == State.DISPUTED, "Not in dispute state");
         require(nonce == deal.nonce, "Nonce mismatch for dispute resolve");
         require(resolution == State.COMPLETE || resolution == State.REFUNDED, "Resolution type invalid");
-
         bytes32 hash = keccak256(
             abi.encode(
                 block.chainid,
@@ -661,8 +608,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 deal.depositTime,
                 deadline,
                 nonce,
-                "resolveDispute",
-                resolution
+                "resolveDispute"
             )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
