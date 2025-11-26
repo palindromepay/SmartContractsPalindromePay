@@ -70,8 +70,8 @@ async function deployContract(
 
 async function main() {
     // 1. Deploy USDT
-    let usdtAddress = USDT_ADDRESS;
-    if (!usdtAddress) {
+    let usdtAddress = "";
+    if (usdtAddress === "") {
         const USDT_INITIAL_SUPPLY = 10_000_000n * 10n ** 6n; // 10 million tokens with 6 decimals
         const usdt = await deployContract(deployerClient, {
             abi: USDTArtifact.abi,

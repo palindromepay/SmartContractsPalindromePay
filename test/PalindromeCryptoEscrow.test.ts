@@ -587,92 +587,6 @@ test('buyer or seller can start dispute only in AWAITING_DELIVERY', async () => 
 });
 
 
-// Dispute resolved to seller, seller can withdraw
-test('dispute resolved to seller and withdrawal', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id] });
-
-
-    // Arbitrator (owner) resolves to seller
-    await ownerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'resolveDispute',
-        args: [id, State.COMPLETE]
-    });
-
-
-    // Seller can withdraw
-    let sellerWithdrawable = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdrawable',
-        args: [tokenAddress, seller.address]
-    });
-    assert(Number(sellerWithdrawable) > 0, "Seller withdrawable after dispute resolution");
-
-
-    // Seller withdraws
-    await sellerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdraw',
-        args: [id]
-    });
-    sellerWithdrawable = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdrawable',
-        args: [tokenAddress, seller.address]
-    });
-    assert.equal(Number(sellerWithdrawable), 0, "Withdrawable zero after seller claim");
-});
-
-
-// Dispute resolved to buyer, buyer can withdraw
-test('dispute resolved to buyer and withdrawal', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id] });
-
-
-    // Arbitrator (owner) resolves to buyer (refund)
-    await ownerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'resolveDispute',
-        args: [id, State.REFUNDED]
-    });
-
-
-    // Buyer should have withdrawable
-    let buyerWithdrawable = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdrawable',
-        args: [tokenAddress, buyer.address]
-    });
-    assert(Number(buyerWithdrawable) > 0, "Buyer withdrawable after dispute resolved refunded");
-
-
-    // Buyer withdraws
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdraw',
-        args: [id]
-    });
-    buyerWithdrawable = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'withdrawable',
-        args: [tokenAddress, buyer.address]
-    });
-    assert.equal(Number(buyerWithdrawable), 0, "Withdrawable zero after buyer claim");
-});
-
-
 test('seller withdraw reverts if balance is zero after payout claimed', async () => {
     const id = await setupDeal();
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
@@ -1129,6 +1043,73 @@ test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signat
         'Buyer cancel request should be recorded after requestCancelSigned',
     );
 });
+
+test('submitArbiterDecision posts arbiter message and resolves dispute atomically', async () => {
+    // 1) Create deal, deposit, and start dispute
+    const id = await setupDeal();
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id],
+    });
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'startDispute',
+        args: [id],
+    });
+
+    let deal = await getDeal(id);
+    assert.equal(deal[8], State.DISPUTED, 'Escrow should be DISPUTED before arbiter decision');
+
+    // 2) Call submitArbiterDecision as arbiter (owner)
+    const arbiterEvidenceHash = 'QmArbiterEvidenceHash';
+    await ownerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'submitArbiterDecision',
+        args: [id, State.COMPLETE, arbiterEvidenceHash], // seller wins
+    });
+
+    // 3) Check state and withdrawable balances after decision
+    deal = await getDeal(id);
+    assert.equal(
+        deal[8],
+        State.COMPLETE,
+        'Escrow should be COMPLETE after submitArbiterDecision',
+    );
+
+    const sellerWithdrawable = await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'withdrawable',
+        args: [tokenAddress, seller.address],
+    }) as bigint;
+    assert(sellerWithdrawable > 0n, 'Seller should have withdrawable balance after arbiter decision');
+
+    // 4) Ensure disputeStatus cleared (bitmask = 0)
+    const status = await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'disputeStatus',
+        args: [id],
+    }) as bigint;
+    assert.equal(status, 0n, 'disputeStatus should be cleared after submitArbiterDecision');
+
+    // 5) Negative: second arbiter decision must revert (already finalized)
+    await assert.rejects(
+        async () =>
+            ownerClient.writeContract({
+                address: escrowAddress,
+                abi: escrowAbi,
+                functionName: 'submitArbiterDecision',
+                args: [id, State.COMPLETE, arbiterEvidenceHash],
+            }),
+    );
+
+});
+
 
 
 

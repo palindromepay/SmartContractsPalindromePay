@@ -491,26 +491,52 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     }
 
     /**
-     * @notice Resolves a dispute for a given escrow by setting its state to the specified resolution.
-     * @dev Resolves a dispute for a given escrow by setting its state to the provided resolution.
-     * Only callable by the arbiter of the escrow. The resolution must be either COMPLETE or REFUNDED. 
-     * If COMPLETE then Seller receives token if REFUNDED then Buyer receives token.
-     * Transfers the escrow amount to the appropriate party and deletes the dispute status.
-     * Emits a DisputeResolved event.
+     * @notice Submits the arbiter's decision and evidence for a disputed escrow in a single transaction.
+     * @dev Only callable by the arbiter of the escrow when the deal is in the DISPUTED state.
+     *      Records the arbiter's dispute message, then resolves the dispute as either COMPLETE or REFUNDED.
+     *      If resolution is COMPLETE the seller receives the escrowed amount (with fee applied); 
+     *      if REFUNDED the buyer receives the amount (no fee). Updates withdrawable balances,
+     *      clears the disputeStatus bitmask, and sets the final escrow state.
+     *      Emits both {DisputeMessagePosted} and {DisputeResolved} events on success.
      * @param escrowId The ID of the escrow to resolve.
-     * @param resolution The resolution state to set for the escrow.
+     * @param resolution The resolution state to set for the escrow (must be COMPLETE or REFUNDED).
+     * @param ipfsHash The IPFS hash pointing to the arbiter's decision/evidence payload.
      */
-    function resolveDispute(uint256 escrowId, State resolution) external nonReentrant onlyArbiter(escrowId) {
+    function submitArbiterDecision(
+        uint256 escrowId,
+        State resolution,
+        string calldata ipfsHash
+    ) external nonReentrant onlyArbiter(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
+
         require(deal.state == State.DISPUTED, "Not DISPUTED");
-        require(resolution == State.COMPLETE || resolution == State.REFUNDED, "Invalid resolution");
+        require(
+            resolution == State.COMPLETE || resolution == State.REFUNDED,
+            "Invalid resolution"
+        );
+
+        uint256 mask = uint256(1) << 2; // Arbiter bit
+        require((disputeStatus[escrowId] & mask) == 0, "Already submitted message");
+        disputeStatus[escrowId] |= mask;
+
+        emit DisputeMessagePosted(
+            escrowId,
+            msg.sender,
+            uint256(Role.Arbiter),
+            ipfsHash,
+            disputeStatus[escrowId]
+        );
+
         address target = resolution == State.COMPLETE ? deal.seller : deal.buyer;
-        bool applyFee = (resolution == State.COMPLETE); // only if seller wins
+        bool applyFee = (resolution == State.COMPLETE);
         uint256 fee = _escrowPayout(deal.token, target, deal.amount, applyFee);
+
         delete disputeStatus[escrowId];
         deal.state = resolution;
+
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
     }
+
 
     /**
      * @notice Confirms the delivery of an item in escrow by verifying the buyer's signature.
