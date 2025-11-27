@@ -11,4 +11,8 @@ constructor(
 ) ERC20(name_, symbol_) {
     _mint(msg.sender, initialSupply * 3); // Owner gets everything to redistribute in tests
     }
+
+    function decimals() public view virtual override returns (uint8) {
+        return 6;
+    }
 }

@@ -61,7 +61,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     );
     event PaymentDeposited(uint256 indexed escrowId, address indexed buyer, uint256 amount);
     event DeliveryConfirmed(uint256 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount, uint256 fee);
-    event AutoReleased(uint256 indexed escrowId, address indexed seller, uint256 amount, uint256 fee);
     event RequestCancel(uint256 indexed escrowId, address indexed requester);
     event Canceled(uint256 indexed escrowId, address indexed initiator, uint256 amount, uint256 fee);
     event DisputeStarted(uint256 indexed escrowId, address indexed initiator);
@@ -364,31 +363,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 fee = _escrowPayout(deal.token, deal.seller, deal.amount, true);
         deal.state = State.COMPLETE;
         emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee);
-    }
-
-    /**
-     * @notice Automatically releases the escrow funds to the seller if the maturity time has been reached.
-     * @param escrowId The ID of the escrow deal to be released.
-     * @dev Automatically releases the escrow amount to the seller if the maturity time has been reached.
-     * Requirements:
-     * - The escrow must be in the AWAITING_DELIVERY state.
-     * - The deposit time and maturity time must be set.
-     * - The current block timestamp must be greater than the deposit time plus the maturity period.
-     * - Only the seller can call this function.
-     * - The function is protected against reentrancy.
-     */
-    function autoRelease(uint256 escrowId) external nonReentrant onlySeller(escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
-        require(deal.depositTime != 0, "No deposit yet");
-        
-        // Now maturityTime is the absolute deadline timestamp
-        require(block.timestamp > deal.maturityTime, "Maturity time not reached");
-
-        uint256 fee = _escrowPayout(deal.token, deal.seller, deal.amount, true);
-        deal.state = State.COMPLETE;
-
-        emit AutoReleased(escrowId, deal.seller, deal.amount, fee);
     }
 
     /**
@@ -727,7 +701,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(signer == deal.arbiter, "Signature does not match arbiter");
         deal.nonce++;
         address target = resolution == State.COMPLETE ? deal.seller : deal.buyer;
-        uint256 fee = _escrowPayout(deal.token, target, deal.amount, true);
+        bool applyFee = (resolution == State.COMPLETE);
+        uint256 fee = _escrowPayout(deal.token, target, deal.amount, applyFee);
         delete disputeStatus[escrowId];
         deal.state = resolution;
         emit DisputeResolved(escrowId, resolution, signer, deal.amount, fee);
