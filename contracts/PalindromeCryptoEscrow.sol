@@ -246,7 +246,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(token != address(0), "Token cannot be zero address");
         require(allowedTokens[token], "Token not allowed");
         require(buyer != address(0), "Buyer cannot be zero address");
-        require(buyer != msg.sender, "Buyer and seller cannot be same");
         require(amount > 0, "Amount must be > 0");
         require(maturityTimeDays < 3651, "Max 10 years");
 
@@ -258,7 +257,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         address sellerParam = seller == address(0) ? msg.sender : seller;
         address arbiterParam = arbiter == address(0) ? owner() : arbiter;
 
-        require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
+        require(arbiterParam != msg.sender && arbiterParam != buyer, "Invalid arbiter");
         require(buyer != sellerParam, "Buyer and seller cannot be same");
         
         EscrowDeal storage deal = escrows[escrowId];
@@ -277,10 +276,10 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         emit EscrowCreated(
             escrowId,
             buyer,
-            msg.sender,
+            sellerParam,
             token,
             amount,
-            arbiter,
+            arbiterParam,
             maturityTimeDays,
             title,
             ipfsHash
