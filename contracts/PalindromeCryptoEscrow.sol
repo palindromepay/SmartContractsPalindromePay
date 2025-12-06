@@ -503,14 +503,11 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 amount = withdrawable[escrowId][msg.sender];
         require(amount > 0, "Nothing to withdraw");
 
+        uint256 currentAgg = aggregatedBalance[deal.token][msg.sender];
+        require(currentAgg >= amount, "Insufficient aggregate balance");
 
         withdrawable[escrowId][msg.sender] = 0;
-        aggregatedBalance[deal.token][msg.sender] -= amount;
-
-        require(
-            aggregatedBalance[deal.token][msg.sender] >= amount,
-            "Insufficient aggregate balance"
-        );
+        aggregatedBalance[deal.token][msg.sender] = currentAgg - amount;
 
         if (msg.sender == deal.buyer) {
             deal.buyerWithdrawn = true;
@@ -520,7 +517,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
 
         emit Withdrawn(deal.token, msg.sender, amount);
         IERC20(deal.token).safeTransfer(msg.sender, amount);
-     
     }
 
     /// @notice Allows the contract owner (recommended: multisig) to withdraw all accumulated protocol fees for a specific token
