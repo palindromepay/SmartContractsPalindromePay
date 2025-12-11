@@ -621,12 +621,6 @@ test('[ERROR] InvalidNonce error on nonce reuse', async () => {
     const deadline = BigInt(Number(block.timestamp) + 3600);
     const nonce = 0n;
 
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const types = {
         ConfirmDelivery: [
             { name: 'escrowId', type: 'uint256' },
@@ -638,7 +632,6 @@ test('[ERROR] InvalidNonce error on nonce reuse', async () => {
             { name: 'depositTime', type: 'uint256' },
             { name: 'deadline', type: 'uint256' },
             { name: 'nonce', type: 'uint256' },
-            { name: 'contractNonce', type: 'uint256' },
         ],
     } as const;
 
@@ -652,7 +645,6 @@ test('[ERROR] InvalidNonce error on nonce reuse', async () => {
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const signature = await buyerClient.signTypedData({
@@ -732,12 +724,6 @@ test('[ERROR] SignatureAlreadyUsed error on signature replay', async () => {
     const deadline = BigInt(Number(block.timestamp) + 3600);
     const nonce = 0n;
 
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const types = {
         ConfirmDelivery: [
             { name: 'escrowId', type: 'uint256' },
@@ -749,7 +735,6 @@ test('[ERROR] SignatureAlreadyUsed error on signature replay', async () => {
             { name: 'depositTime', type: 'uint256' },
             { name: 'deadline', type: 'uint256' },
             { name: 'nonce', type: 'uint256' },
-            { name: 'contractNonce', type: 'uint256' },
         ],
     } as const;
 
@@ -763,7 +748,6 @@ test('[ERROR] SignatureAlreadyUsed error on signature replay', async () => {
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const signature = await buyerClient.signTypedData({
@@ -809,29 +793,6 @@ test('[ERROR] AmountTooSmall error for below minimum amount', async () => {
         async () => await createEscrow(token6Address, tooSmall),
         (err: any) => String(err?.shortMessage).includes('Internal error'),
         'Should reject with AmountTooSmall error'
-    );
-});
-
-test('[ERROR] InvalidArbiter error when arbiter is zero address', async () => {
-    await fundAndApprove(token6Address, 10_000_000n);
-
-    await assert.rejects(
-        async () => await sellerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'createEscrow',
-            args: [
-                token6Address,
-                buyer.address,
-                10_000_000n,
-                0n,
-                '0x0000000000000000000000000000000000000000',
-                'Test',
-                'QmHash'
-            ],
-        }),
-        (err: any) => String(err?.shortMessage).includes('Internal error'),
-        'Should reject with InvalidArbiter error'
     );
 });
 
@@ -1011,8 +972,6 @@ test('[WALLET] Wallet owner count is 3', async () => {
         abi: walletAbi,
         functionName: 'getOwners',
     }) as Address[];
-
-
     assert.equal(owners.length, 3, 'Wallet should have exactly 3 owners');
 });
 

@@ -71,7 +71,7 @@ async function main() {
         const usdt = await deployContract(deployerClient, {
             abi: USDTArtifact.abi,
             bytecode: USDTArtifact.bytecode,
-            args: ["Tether USD", "USDT", USDT_INITIAL_SUPPLY],
+            args: ["Tether USD", "USDT", USDT_INITIAL_SUPPLY, 6],
         });
         usdtAddress = usdt.address;
     } else {

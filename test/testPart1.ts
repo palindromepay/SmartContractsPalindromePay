@@ -171,7 +171,6 @@ async function fundAndApprove(amount: bigint = AMOUNT) {
     });
 }
 
-
 async function createEscrow(amount: bigint = AMOUNT, maturityDays: bigint = 0n) {
     await sellerClient.writeContract({
         address: escrowAddress,
@@ -238,7 +237,6 @@ const types = {
         { name: 'depositTime', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
         { name: 'nonce', type: 'uint256' },
-        { name: 'contractNonce', type: 'uint256' },
     ],
     RequestCancel: [
         { name: 'escrowId', type: 'uint256' },
@@ -250,7 +248,6 @@ const types = {
         { name: 'depositTime', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
         { name: 'nonce', type: 'uint256' },
-        { name: 'contractNonce', type: 'uint256' },
     ],
     StartDispute: [
         { name: 'escrowId', type: 'uint256' },
@@ -262,17 +259,10 @@ const types = {
         { name: 'depositTime', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
         { name: 'nonce', type: 'uint256' },
-        { name: 'contractNonce', type: 'uint256' },
     ],
 } as const;
 
 async function signConfirmDeliveryTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint) {
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const message = {
         escrowId: BigInt(escrowId),
         buyer: deal.buyer as Address,
@@ -283,7 +273,6 @@ async function signConfirmDeliveryTyped(escrowId: number, deal: any, deadline: b
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     return buyerClient.signTypedData({
@@ -296,11 +285,6 @@ async function signConfirmDeliveryTyped(escrowId: number, deal: any, deadline: b
 }
 
 async function signStartDisputeTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint, signer: 'buyer' | 'seller') {
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
 
     const message = {
         escrowId: BigInt(escrowId),
@@ -312,7 +296,6 @@ async function signStartDisputeTyped(escrowId: number, deal: any, deadline: bigi
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const account = signer === 'buyer' ? (deal.buyer as Address) : (deal.seller as Address);
@@ -328,11 +311,6 @@ async function signStartDisputeTyped(escrowId: number, deal: any, deadline: bigi
 }
 
 async function signRequestCancelTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint, signer: 'buyer' | 'seller') {
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
 
     const message = {
         escrowId: BigInt(escrowId),
@@ -344,7 +322,6 @@ async function signRequestCancelTyped(escrowId: number, deal: any, deadline: big
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const account = signer === 'buyer' ? (deal.buyer as Address) : (deal.seller as Address);
@@ -622,11 +599,6 @@ test('meta transaction: invalid signature is rejected', async () => {
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce: await publicClient.readContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'contractNonce',
-        }) as bigint,
     } as const;
 
     const invalidSig = await sellerClient.signTypedData({
@@ -809,6 +781,8 @@ test('submitArbiterDecision posts arbiter message and resolves dispute atomicall
         args: [id, Role.Seller, 'QmSellerEvidence']
     });
 
+    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+
     const arbiterEvidenceHash = 'QmArbiterEvidenceHash';
     await ownerClient.writeContract({
         address: escrowAddress,
@@ -847,6 +821,9 @@ test('arbiter resolves dispute in favor of buyer (REFUNDED)', async () => {
         functionName: 'submitDisputeMessage',
         args: [id, Role.Buyer, 'QmBuyerEvidence']
     });
+
+    await increaseTime(24 * 60 * 60);
+
     await sellerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
@@ -886,6 +863,7 @@ test('refunded/canceled proposals have zero fee', async () => {
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id1] });
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id1, Role.Buyer, 'QmEvidence'] });
     await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id1, Role.Seller, 'QmEvidence'] });
+    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
     await ownerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [id1, State.REFUNDED, 'QmBuyerWins'] });
 
     const id2 = await setupDeal();
@@ -943,6 +921,45 @@ test('arbiter cannot resolve dispute without buyer/seller evidence', async () =>
         },
     );
 });
+
+test('arbiter can force recovery refund after long delay', async () => {
+    const MATURITY_DAYS = 1n;
+    const id = await setupDeal(AMOUNT, MATURITY_DAYS);
+
+    // Buyer deposits -> AWAITING_DELIVERY
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id],
+    });
+
+    // Buyer confirms delivery -> COMPLETE
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'confirmDelivery',
+        args: [id, 'QmDeliveryProof'],
+    });
+
+    // Fast-forward past COMPLETE_RECOVERY_DELAY
+    const fastForward =
+        EMERGENCY_RECOVERY_DELAY_SECONDS + Number(MATURITY_DAYS) * 86400 + 10;
+    await increaseTime(fastForward);
+
+    // Arbiter triggers recovery refund
+    await ownerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'forceRecoveryRefund',
+        args: [id],
+    });
+
+    const deal = await getDeal(id);
+    assert.equal(deal.state, State.REFUNDED, 'State should be REFUNDED after recovery refund');
+    // Optionally: assert from PayoutProposed events that payout is to buyer with 0 fee
+});
+
 
 
 test('emergency recovery initiation and execution propose payout', async () => {
@@ -1005,9 +1022,9 @@ test('no fee on refund proposal', async () => {
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id] });
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id, Role.Buyer, 'Qm'] });
     await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id, Role.Seller, 'Qm'] });
+    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
     await ownerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [id, State.REFUNDED, 'Qm'] });
 
-    // Check logs for PayoutProposed with fee=0
 });
 
 

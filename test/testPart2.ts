@@ -177,7 +177,6 @@ const types = {
         { name: 'depositTime', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
         { name: 'nonce', type: 'uint256' },
-        { name: 'contractNonce', type: 'uint256' },
     ],
 } as const;
 
@@ -333,12 +332,6 @@ test('[SIGNATURE] Cannot reuse signature across different escrows', async () => 
     const deadline = BigInt(Number(block.timestamp) + 3600);
     const nonce = 0n;
 
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const message = {
         escrowId: BigInt(id1),
         buyer: deal1.buyer as Address,
@@ -349,7 +342,6 @@ test('[SIGNATURE] Cannot reuse signature across different escrows', async () => 
         depositTime: deal1.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const signature = await buyerClient.signTypedData({
@@ -397,12 +389,6 @@ test('[SIGNATURE] Contract nonce prevents replay after contract upgrade', async 
     const deadline = BigInt(Number(block.timestamp) + 3600);
     const nonce = 0n;
 
-    const contractNonceBefore = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const message = {
         escrowId: BigInt(id),
         buyer: deal.buyer as Address,
@@ -413,7 +399,6 @@ test('[SIGNATURE] Contract nonce prevents replay after contract upgrade', async 
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce: contractNonceBefore,
     } as const;
 
     const signature = await buyerClient.signTypedData({
@@ -426,7 +411,6 @@ test('[SIGNATURE] Contract nonce prevents replay after contract upgrade', async 
 
     // Simulate contract upgrade by incrementing contract nonce
     // In real scenario, this would happen during contract migration
-    // For this test, we just verify the signature includes contractNonce
 
     await buyerClient.writeContract({
         address: escrowAddress,
@@ -482,12 +466,6 @@ test('[SIGNATURE] Signature deadline exactly at block timestamp boundary', async
     const deadline = block.timestamp;
     const nonce = 0n;
 
-    const contractNonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'contractNonce',
-    }) as bigint;
-
     const message = {
         escrowId: BigInt(id),
         buyer: deal.buyer as Address,
@@ -498,7 +476,6 @@ test('[SIGNATURE] Signature deadline exactly at block timestamp boundary', async
         depositTime: deal.depositTime as bigint,
         deadline,
         nonce,
-        contractNonce,
     } as const;
 
     const signature = await buyerClient.signTypedData({
@@ -584,6 +561,8 @@ test('[FEE] Fee is zero for refund scenario', async () => {
         args: [id, Role.Seller, 'QmSellerEvidence'],
     });
 
+    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+
     await ownerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
@@ -659,7 +638,7 @@ test('[AUTH] Buyer and seller cannot be the same address', async () => {
                 0n,
                 owner.address,
                 'Self-dealing escrow',
-                'QmHash'
+                'QmHash',
             ],
         }),
         'Should reject escrow where buyer equals seller'
