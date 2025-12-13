@@ -914,7 +914,7 @@ test('no fee on refund proposal', async () => {
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id] });
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id, Role.Buyer, 'Qm'] });
     await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id, Role.Seller, 'Qm'] });
-    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+    await increaseTime(72 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
     await ownerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [id, State.REFUNDED, 'Qm'] });
 
 });

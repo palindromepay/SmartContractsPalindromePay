@@ -48,6 +48,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 amount;
         uint256 depositTime;
         uint256 maturityTime;
+        uint256 creationTime;
         uint256 disputeStartTime;
         State state;
         bool buyerCancelRequested;
@@ -76,7 +77,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     error OnlyBuyer();
     error OnlyArbiter();
     error OnlyBuyerOrSeller();
-    error OnlySeller();
     error NotParticipant();
 
     event WalletCreated(uint256 indexed escrowId, address indexed wallet);
@@ -153,6 +153,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         State indexed newState
     );
 
+    event EscrowCreatedAndDeposited(
+        uint256 indexed escrowId,
+        address indexed buyer,
+        uint256 amount
+    );
+
     modifier escrowExists(uint256 escrowId) {
         require(escrowId < nextEscrowId, "Escrow does not exist");
         require(escrows[escrowId].buyer != address(0), "Escrow not initialized");
@@ -163,14 +169,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
         if (msg.sender != deal.buyer && msg.sender != deal.seller && msg.sender != deal.arbiter) {
             revert NotParticipant();
-        }
-        _;
-    }
-
-    modifier onlySeller(uint256 escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        if (msg.sender != deal.seller) {
-            revert OnlySeller();
         }
         _;
     }
@@ -321,10 +319,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
 
     bytes32 private constant CONFIRM_DELIVERY_TYPEHASH = keccak256(
         "ConfirmDelivery(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
-    );
-
-    bytes32 private constant REQUEST_CANCEL_TYPEHASH = keccak256(
-        "RequestCancel(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
     );
 
     bytes32 private constant START_DISPUTE_TYPEHASH = keccak256(
@@ -481,6 +475,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         deal.arbiter = arbiter;
         deal.wallet = address(wallet);
         deal.amount = amount;
+        deal.creationTime = block.timestamp; 
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
@@ -578,6 +573,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         deal.arbiter = arbiter;
         deal.wallet = address(wallet);
         deal.amount = amount;
+        deal.creationTime = block.timestamp; 
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
@@ -599,7 +595,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         deal.depositTime = block.timestamp;
         deal.state = State.AWAITING_DELIVERY;
 
-        emit PaymentDeposited(escrowId, msg.sender, amount);
+        emit EscrowCreatedAndDeposited(escrowId, msg.sender, amount);
     }
 
    /**
@@ -612,6 +608,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     function deposit(uint256 escrowId) external nonReentrant escrowExists(escrowId) onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_PAYMENT, "Not awaiting payment");
+
+        uint256 originalDelta = deal.maturityTime - deal.creationTime;
+        deal.maturityTime = block.timestamp + originalDelta;
 
         IERC20(deal.token).safeTransferFrom(msg.sender, deal.wallet, deal.amount);
         deal.depositTime = block.timestamp;
@@ -899,7 +898,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         require((signer == deal.buyer) || (signer == deal.seller), "Unauthorized signer");
 
         _useSignature(escrowId, signature);
-        _useNonce(escrowId, msg.sender, nonce);
+        _useNonce(escrowId, signer, nonce);
 
         deal.state = State.DISPUTED;
         deal.disputeStartTime = block.timestamp;
