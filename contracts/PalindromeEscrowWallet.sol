@@ -188,7 +188,6 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
         return account == buyer || account == seller || account == arbiter;
     }
 
-
     /// @notice Execute a split ERC20 transfer (net + fee) with sufficient EIP-712 signatures
     /// @param to Recipient of the netAmount (fee goes to feeTo)
     /// @param signatures Array of signatures (65 bytes each, any order; empty bytes for non-signers)
@@ -215,6 +214,15 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
                 state == IPalindromeCryptoEscrow.State.CANCELED,
             "Invalid escrow state"
         );
+
+        if (state == IPalindromeCryptoEscrow.State.COMPLETE) {
+            require(to == seller, "Must pay seller on COMPLETE");
+         } else if (
+            state == IPalindromeCryptoEscrow.State.REFUNDED ||
+            state == IPalindromeCryptoEscrow.State.CANCELED
+        ) {
+            require(to == buyer, "Must refund buyer on REFUNDED/CANCELED");
+        }
 
         // Build EIP-712 digest (unchanged)
         bytes32 structHash = keccak256(
@@ -270,8 +278,6 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
             feeAmount
         );
     }
-
-
 
     /// @dev Internal helper to count and validate signatures (EIP-712 digest)
     function _countValidSignatures(

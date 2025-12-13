@@ -505,7 +505,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         return escrowId;
     }
 
-
     /**
      * @notice Create a new escrow and immediately deposit funds into its multisig wallet.
      * @dev Buyer calls this to open and fund an escrow in a single transaction.
@@ -602,7 +601,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
 
         emit PaymentDeposited(escrowId, msg.sender, amount);
     }
-
 
    /**
      * @notice Deposit the escrow amount into the dedicated multisig wallet.
