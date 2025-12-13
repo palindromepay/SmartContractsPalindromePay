@@ -266,7 +266,7 @@ test('[DECIMALS-18] Full escrow flow with 18-decimal token (DAI/USDC-like)', asy
 
 test('[DECIMALS-18] Minimum amount threshold for 18-decimal token', async () => {
     // For 18 decimals: minFee = 10^16, minimum amount = 10^16 * 100 = 10^18
-    const minimumAmount = 1_000_000_000_000_000_000n; // 1 token (10^18)
+    const minimumAmount = 10_000_000_000_000_000_000n; // 1 token (10^18)
 
     const id = await setupDeal(token18Address, minimumAmount);
 
@@ -295,7 +295,7 @@ test('[DECIMALS-18] Minimum amount threshold for 18-decimal token', async () => 
     );
 
     // At minimum amount, fee should be 1% but not less than minFee (10^16)
-    const expectedFee = 10_000_000_000_000_000n; // 0.01 tokens
+    const expectedFee = 100_000_000_000_000_000n; // 0.01 tokens
     assert.equal(deliveryLog?.args.fee, expectedFee, 'Fee should meet minimum threshold');
 });
 
@@ -378,7 +378,7 @@ test('[DECIMALS-18] Fee calculation with large amounts (precision test)', async 
 
 test('[DECIMALS-8] Full escrow flow with 8-decimal token (WBTC-like)', async () => {
     // For 8 decimals: minFee = 10^6 (0.01 BTC), minimum amount = 10^8 (1 BTC)
-    const amount = 100_000_000n; // 1 BTC
+    const amount = 1000_000_000n; // 10 USDT
 
     const id = await setupDeal(token8Address, amount);
 
@@ -429,7 +429,7 @@ test('[DECIMALS-8] Full escrow flow with 8-decimal token (WBTC-like)', async () 
 
 test('[DECIMALS-8] Minimum amount threshold for 8-decimal token', async () => {
     // For 8 decimals: minFee = 10^6, minimum amount = 10^6 * 100 = 10^8
-    const minimumAmount = 100_000_000n; // 1 BTC (10^8)
+    const minimumAmount = 1000_000_000n; // 10 USDT (10^8)
 
     const id = await setupDeal(token8Address, minimumAmount);
 
@@ -458,7 +458,7 @@ test('[DECIMALS-8] Minimum amount threshold for 8-decimal token', async () => {
     );
 
     // At minimum amount, fee should be 1% which equals minFee
-    const expectedFee = 1_000_000n; // 0.01 BTC
+    const expectedFee = 10_000_000n; // 0.01 BTC
     assert.equal(deliveryLog?.args.fee, expectedFee, 'Fee should meet minimum threshold');
 });
 
@@ -1001,10 +1001,10 @@ test('[CROSS-TOKEN] Can create escrows with different token decimals simultaneou
     const id6 = await setupDeal(token6Address, 10_000_000n);
 
     // 8 decimals
-    const id8 = await setupDeal(token8Address, 100_000_000n);
+    const id8 = await setupDeal(token8Address, 1000_000_000n);
 
     // 18 decimals
-    const id18 = await setupDeal(token18Address, 1_000_000_000_000_000_000n);
+    const id18 = await setupDeal(token18Address, 10_000_000_000_000_000_000n);
 
     const deal6 = await getDeal(id6);
     const deal8 = await getDeal(id8);
@@ -1017,9 +1017,9 @@ test('[CROSS-TOKEN] Can create escrows with different token decimals simultaneou
 
 test('[CROSS-TOKEN] Fee calculations remain consistent across decimals', async () => {
     // All escrows with same economic value (1 unit of token)
-    const amount6 = 1_000_000n; // 1 USDT
-    const amount8 = 100_000_000n; // 1 WBTC
-    const amount18 = 1_000_000_000_000_000_000n; // 1 USDC
+    const amount6 = 10_000_000n; // 1 USDT
+    const amount8 = 1000_000_000n; // 1 WBTC
+    const amount18 = 10_000_000_000_000_000_000n; // 1 USDC
 
     const id6 = await setupDeal(token6Address, amount6);
     const id8 = await setupDeal(token8Address, amount8);
@@ -1083,9 +1083,9 @@ test('[CROSS-TOKEN] Fee calculations remain consistent across decimals', async (
     const fee18 = logs18.find((l: any) => l.eventName === 'DeliveryConfirmed')?.args.fee;
 
     // All should be at minimum fee threshold (1% of 1 unit)
-    assert.equal(fee6, 10_000n, '6-decimal fee correct');
-    assert.equal(fee8, 1_000_000n, '8-decimal fee correct');
-    assert.equal(fee18, 10_000_000_000_000_000n, '18-decimal fee correct');
+    assert.equal(fee6, 100_000n, '6-decimal fee correct');
+    assert.equal(fee8, 10_000_000n, '8-decimal fee correct');
+    assert.equal(fee18, 100_000_000_000_000_000n, '18-decimal fee correct');
 
     // Verify fees are proportional to decimal places
     // 1% of amount should be: amount / 100

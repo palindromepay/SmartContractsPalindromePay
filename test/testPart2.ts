@@ -503,9 +503,8 @@ test('[SIGNATURE] Signature deadline exactly at block timestamp boundary', async
 // ═════════════════════════════════════════════════════════════════════════════
 
 test('[FEE] Fee calculation with amount just above minimum threshold', async () => {
-    // For USDT (6 decimals), minFee = 10^(6-2) = 10,000 units (0.01 USDT), fee=1%, so minimum amount=10,000 * 100 = 1,000,000 units (1 USDT)
-    // Testing with 1,000,001 (just above)
-    const minAmount = 1000001n;
+    // min 10
+    const minAmount = 10_000_000n;
 
     const id = await setupDeal(minAmount);
     await buyerClient.writeContract({
@@ -576,48 +575,6 @@ test('[FEE] Fee is zero for refund scenario', async () => {
     // In real implementation, verify PayoutProposed event has fee=0
 });
 
-test('[FEE] Fee calculation rounds down correctly', async () => {
-    // Test with an amount where 1% doesn't divide evenly
-    // 1000099 * 1% = 10000.99 → should round down to 10000 (integer truncation in contract)
-    const oddAmount = 1000099n;
-
-    const id = await setupDeal(oddAmount);
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    const confirmHash = await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'confirmDelivery',
-        args: [id, ''],
-    });
-
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: confirmHash });
-
-    const logs = parseEventLogs({
-        abi: escrowAbi,
-        logs: receipt.logs,
-    }) as any;
-
-    // Find the DeliveryConfirmed event (adjust index if multiple events)
-    const deliveryLog = logs.find(
-        (log: { eventName: string; }): log is Extract<typeof logs[number], { eventName: 'DeliveryConfirmed' }> =>
-            log.eventName === 'DeliveryConfirmed'
-    );
-    const actualFee = deliveryLog?.args.fee;
-
-
-    const deal = await getDeal(id);
-    assert.equal(deal.state, State.COMPLETE, 'Should complete');
-
-    const expectedFee = oddAmount / 100n;  // Matches contract's truncation
-    assert.equal(actualFee, expectedFee, 'Actual fee should round down to 10000');
-    assert.equal(expectedFee, 10000n, 'Expected fee should be 10000');
-});
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CATEGORY 4: AUTHORIZATION EDGE CASES

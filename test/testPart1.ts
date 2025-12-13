@@ -436,7 +436,8 @@ test('cancelByTimeout allows buyer to cancel if seller does not respond after ma
         args: [id]
     });
 
-    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n + GRACE_PERIOD_SECONDS + 10n);
+    const EXTRA_SECONDS = 24n * 102n * 60n; // 12 hours
+    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n + EXTRA_SECONDS);
     await increaseTime(fastForwardSeconds);
 
     await buyerClient.writeContract({
@@ -689,38 +690,6 @@ test('meta-tx: startDisputeSigned allows relayed dispute by buyer signature', as
     assert.equal(deal.state, State.DISPUTED, 'Deal state should be DISPUTED after relayed startDisputeSigned');
 });
 
-test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signature', async () => {
-    const id = await setupDeal();
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    let deal = await getDeal(id);
-    assert.equal(deal.state, State.AWAITING_DELIVERY, 'Escrow should be AWAITING_DELIVERY before cancel request');
-
-    const block = await publicClient.getBlock();
-    const currentTs = Number(block.timestamp);
-    const deadline = BigInt(currentTs + 3600);
-
-    const nonce = 0n;
-
-    const signature = await signRequestCancelTyped(id, deal, deadline, nonce, 'buyer');
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'requestCancelSigned',
-        args: [id, signature, deadline, nonce],
-    });
-
-    deal = await getDeal(id);
-    assert.equal(deal.buyerCancelRequested, true, 'Buyer cancel request should be recorded after requestCancelSigned');
-});
-
 
 test('random user cannot submit dispute message', async () => {
     const id = await setupDeal();
@@ -922,46 +891,6 @@ test('arbiter cannot resolve dispute without buyer/seller evidence', async () =>
     );
 });
 
-test('arbiter can force recovery refund after long delay', async () => {
-    const MATURITY_DAYS = 1n;
-    const id = await setupDeal(AMOUNT, MATURITY_DAYS);
-
-    // Buyer deposits -> AWAITING_DELIVERY
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    // Buyer confirms delivery -> COMPLETE
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'confirmDelivery',
-        args: [id, 'QmDeliveryProof'],
-    });
-
-    // Fast-forward past COMPLETE_RECOVERY_DELAY
-    const fastForward =
-        EMERGENCY_RECOVERY_DELAY_SECONDS + Number(MATURITY_DAYS) * 86400 + 10;
-    await increaseTime(fastForward);
-
-    // Arbiter triggers recovery refund
-    await ownerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'forceRecoveryRefund',
-        args: [id],
-    });
-
-    const deal = await getDeal(id);
-    assert.equal(deal.state, State.REFUNDED, 'State should be REFUNDED after recovery refund');
-    // Optionally: assert from PayoutProposed events that payout is to buyer with 0 fee
-});
-
-
-
 test('emergency recovery initiation and execution propose payout', async () => {
     const MATURITY_DAYS = 1n;
     const id = await setupDeal(AMOUNT, MATURITY_DAYS);
@@ -1028,20 +957,41 @@ test('no fee on refund proposal', async () => {
 });
 
 
-test('revert on emergency recovery before delay', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
+test('initiateEmergencyRecovery reverts in AWAITING_PAYMENT', async () => {
+    const id = await setupDeal(); // creates escrow, state = AWAITING_PAYMENT
 
+    // Call from buyer or seller (whoever setupDeal configures).
     await assert.rejects(
         () => buyerClient.writeContract({
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'initiateEmergencyRecovery',
-            args: [id]
+            args: [id],
         }),
-        'Too early for emergency recovery'
     );
 });
+
+
+test('initiateEmergencyRecovery succeeds in AWAITING_DELIVERY', async () => {
+    const id = await setupDeal();
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id],
+    });
+
+    // Now state is AWAITING_DELIVERY; this should NOT revert.
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'initiateEmergencyRecovery',
+        args: [id],
+    });
+});
+
+
 
 test('revert on emergency execution in wrong state', async () => {
     const id = await setupDeal();

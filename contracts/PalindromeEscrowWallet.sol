@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.29;
 
+
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+
 
 interface IPalindromeCryptoEscrow {
     enum State {
@@ -16,25 +19,30 @@ interface IPalindromeCryptoEscrow {
         CANCELED
     }
 
+
+    struct EscrowDeal {
+        address token;
+        address buyer;
+        address seller;
+        address arbiter;
+        address wallet;
+        uint256 amount;
+        uint256 depositTime;
+        uint256 maturityTime;
+        uint256 disputeStartTime;
+        State state;
+        bool buyerCancelRequested;
+        bool sellerCancelRequested;
+        uint8 tokenDecimals;
+    }
+
+
     function getEscrow(uint256 escrowId)
         external
         view
-        returns (
-            address token,
-            address buyer,
-            address seller,
-            address arbiter,
-            address wallet,
-            uint256 amount,
-            uint256 depositTime,
-            uint256 maturityTime,
-            uint256 disputeStartTime,
-            State state,
-            bool buyerCancelRequested,
-            bool sellerCancelRequested,
-            uint8 tokenDecimals
-        );
+        returns (EscrowDeal memory);
 }
+
 
 /// @title PalindromeEscrowWallet - Minimal 2-of-3 multisig wallet for escrow funds
 /// @notice Holds funds for a single escrow, requires 2-of-3 signatures from buyer/seller/arbiter to move funds.
@@ -42,9 +50,11 @@ interface IPalindromeCryptoEscrow {
 contract PalindromeEscrowWallet is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+
     // Escrow reference
     address public immutable escrowContract;
     uint256 public immutable escrowId;
+
 
     address public immutable buyer;
     address public immutable seller;
@@ -54,19 +64,30 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
     uint256 public immutable feeAmount;
     address public immutable token;
 
+
     uint8 public immutable threshold; // 2 for 2-of-3
 
     uint256 public nonce;
+
+    mapping(bytes32 => bool) private usedDigests;
+
+    error SignatureAlreadyUsed();
+    error SignatureLengthInvalid();
+    error SignatureSInvalid();
+    error SignatureVInvalid();
+
 
     // EIP-712
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
 
+
     bytes32 private constant EXEC_SPLIT_TYPEHASH = keccak256(
         "ExecuteSplit(uint256 escrowId,address token,address to,address feeTo,uint256 nonce)"
     );
     bytes32 private immutable DOMAIN_SEPARATOR;
+
 
     event SplitExecuted(
         uint256 indexed nonce,
@@ -96,12 +117,15 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
         );
         require(_threshold == 2, "Threshold must be 2");
 
+
         // Amount overflow + sanity checks
         uint256 total = _netAmount + _feeAmount;
         require(total >= _netAmount && total >= _feeAmount, "Amount overflow");
 
+
         escrowContract = _escrowContract;
         escrowId = _escrowId;
+
 
         token = _token;
         buyer = _buyer;
@@ -111,6 +135,7 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
         netAmount = _netAmount;
         feeAmount = _feeAmount;
         threshold = _threshold;
+
 
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -123,15 +148,51 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
         );
     }
 
+    function _recoverOwner(bytes32 digest, bytes memory signature)
+        internal
+        pure
+        returns (address)
+    {
+        if (signature.length != 65) {
+            revert SignatureLengthInvalid();
+        }
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+
+        // same low-s constraint used in coordinator
+        if (
+            uint256(s)
+                > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+        ) {
+            revert SignatureSInvalid();
+        }
+
+        if (v != 27 && v != 28) {
+            revert SignatureVInvalid();
+        }
+
+        return ECDSA.recover(digest, v, r, s);
+    }
+
+
     /// @notice Check if address is one of the owners
     function isOwner(address account) public view returns (bool) {
         return account == buyer || account == seller || account == arbiter;
     }
 
+
     /// @notice Execute a split ERC20 transfer (net + fee) with sufficient EIP-712 signatures
     /// @param to Recipient of the netAmount (fee goes to feeTo)
     /// @param signatures Array of signatures (65 bytes each, any order; empty bytes for non-signers)
-   function executeERC20Split(
+    function executeERC20Split(
         address to,
         bytes[3] calldata signatures
     ) external nonReentrant {
@@ -143,51 +204,19 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
             "executeERC20Split: Only participant"
         );
 
-        // Check escrow state at coordinator
-        (
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            ,
-            IPalindromeCryptoEscrow.State state,
-            ,
-            ,
+        IPalindromeCryptoEscrow.EscrowDeal memory deal =
+            IPalindromeCryptoEscrow(escrowContract).getEscrow(escrowId);
 
-        ) = IPalindromeCryptoEscrow(escrowContract).getEscrow(escrowId);
+        IPalindromeCryptoEscrow.State state = deal.state;
 
         require(
             state == IPalindromeCryptoEscrow.State.COMPLETE ||
                 state == IPalindromeCryptoEscrow.State.REFUNDED ||
                 state == IPalindromeCryptoEscrow.State.CANCELED,
-            "Escrow not payout-ready"
+            "Invalid escrow state"
         );
 
-        // Enforce correct beneficiary based on escrow state
-        if (state == IPalindromeCryptoEscrow.State.COMPLETE) {
-            require(to == seller, "Must pay seller on COMPLETE");
-        } else if (
-            state == IPalindromeCryptoEscrow.State.REFUNDED ||
-            state == IPalindromeCryptoEscrow.State.CANCELED
-        ) {
-            require(to == buyer, "Must refund buyer on REFUNDED/CANCELED");
-        }
-
-        uint256 totalAmount = netAmount + feeAmount;
-        require(totalAmount > netAmount && totalAmount > feeAmount, "Overflow");
-
-        // Pre-transfer balances
-        uint256 balBefore = IERC20(token).balanceOf(address(this));
-        require(balBefore >= totalAmount, "Insufficient wallet balance");
-
-        uint256 toBefore = IERC20(token).balanceOf(to);
-        uint256 feeBefore = IERC20(token).balanceOf(feeTo);
-
-        // EIP-712 struct (now binds to escrowId)
+        // Build EIP-712 digest (unchanged)
         bytes32 structHash = keccak256(
             abi.encode(
                 EXEC_SPLIT_TYPEHASH,
@@ -198,92 +227,82 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
                 nonce
             )
         );
-
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
         );
 
-        uint8 sigCount = _countValidSignatures(digest, signatures);
-        require(sigCount >= threshold, "Insufficient signatures");
+        // NEW: global replay protection per instruction
+        if (usedDigests[digest]) {
+            revert SignatureAlreadyUsed();
+        }
 
-        nonce++;
+        uint256 sigCount = _countValidSignatures(digest, signatures);
+        require(sigCount >= threshold, "Not enough valid signatures");
 
-        // Transfers
+        // mark this instruction as consumed and bump nonce
+        usedDigests[digest] = true;
+        nonce += 1;
+
+        // do transfers exactly as before
+        IERC20 erc20 = IERC20(token);
+
+        uint256 balanceBefore = erc20.balanceOf(address(this));
+
         if (netAmount > 0) {
-            IERC20(token).safeTransfer(to, netAmount);
+            erc20.safeTransfer(to, netAmount);
         }
         if (feeAmount > 0) {
-            IERC20(token).safeTransfer(feeTo, feeAmount);
+            erc20.safeTransfer(feeTo, feeAmount);
         }
 
-        // Post-transfer balances: enforce exact accounting
-        uint256 toAfter = IERC20(token).balanceOf(to);
-        uint256 feeAfter = IERC20(token).balanceOf(feeTo);
-        uint256 balAfter = IERC20(token).balanceOf(address(this));
-
-        if (netAmount > 0) {
-            require(
-                toAfter - toBefore == netAmount,
-                "Net transfer mismatch"
-            );
-        }
-        if (feeAmount > 0) {
-            require(
-                feeAfter - feeBefore == feeAmount,
-                "Fee transfer mismatch"
-            );
-        }
+        uint256 balanceAfter = erc20.balanceOf(address(this));
         require(
-            balBefore - balAfter == totalAmount,
-            "Wallet balance mismatch"
+            balanceAfter + netAmount + feeAmount == balanceBefore,
+            "Invariant: wrong transferred amount"
         );
 
-        emit SplitExecuted(nonce - 1, token, to, netAmount, feeTo, feeAmount);
+        emit SplitExecuted(
+            nonce - 1,
+            token,
+            to,
+            netAmount,
+            feeTo,
+            feeAmount
+        );
     }
+
+
 
     /// @dev Internal helper to count and validate signatures (EIP-712 digest)
     function _countValidSignatures(
         bytes32 digest,
         bytes[3] calldata signatures
-    ) internal view returns (uint8 count) {
-        address[3] memory owners = [buyer, seller, arbiter];
-        bool[3] memory signed;
+    ) internal view returns (uint256 count) {
+        bool seenBuyer;
+        bool seenSeller;
+        bool seenArbiter;
 
-        for (uint8 i = 0; i < 3; i++) {
-            bytes calldata sig = signatures[i];
-            if (sig.length != 65) continue;
-            (bytes32 r, bytes32 s, uint8 v) = _splitSignature(sig);
-
-            // Enforce canonical s and valid v
-            require(
-                uint256(s)
-                    <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0,
-                "Invalid s"
-            );
-            require(v == 27 || v == 28, "Invalid v");
-
-            address recovered = ECDSA.recover(digest, v, r, s);
-            if (recovered == address(0)) continue;
-
-            // Match against owners, prevent double-count
-            for (uint8 j = 0; j < 3; j++) {
-                if (recovered == owners[j] && !signed[j]) {
-                    signed[j] = true;
-                    count++;
-                    break;
-                }
+        for (uint256 i = 0; i < 3; i++) {
+            bytes memory sig = signatures[i];
+            if (sig.length == 0) {
+                continue;
             }
-        }
-    }
 
-    /// @dev Split signature into r, s, v
-    function _splitSignature(
-        bytes calldata sig
-    ) internal pure returns (bytes32 r, bytes32 s, uint8 v) {
-        assembly {
-            r := calldataload(sig.offset)
-            s := calldataload(add(sig.offset, 32))
-            v := byte(0, calldataload(add(sig.offset, 64)))
+            address signer = _recoverOwner(digest, sig);
+            if (!isOwner(signer)) {
+                continue;
+            }
+
+            if (signer == buyer && !seenBuyer) {
+                seenBuyer = true;
+                count++;
+            } else if (signer == seller && !seenSeller) {
+                seenSeller = true;
+                count++;
+            } else if (signer == arbiter && !seenArbiter) {
+                seenArbiter = true;
+                count++;
+            }
         }
     }
 
@@ -294,4 +313,4 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
         owners[2] = arbiter;
         return owners;
     }
-}
+} 
