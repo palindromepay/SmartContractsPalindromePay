@@ -560,7 +560,7 @@ test('[FEE] Fee is zero for refund scenario', async () => {
         args: [id, Role.Seller, 'QmSellerEvidence'],
     });
 
-    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+    await increaseTime(72 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
 
     await ownerClient.writeContract({
         address: escrowAddress,

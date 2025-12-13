@@ -750,7 +750,7 @@ test('submitArbiterDecision posts arbiter message and resolves dispute atomicall
         args: [id, Role.Seller, 'QmSellerEvidence']
     });
 
-    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+    await increaseTime(72 * 60 * 60 + 1); // >= MIN_EVIDENCE_WINDOW + buffer
 
     const arbiterEvidenceHash = 'QmArbiterEvidenceHash';
     await ownerClient.writeContract({
@@ -763,7 +763,6 @@ test('submitArbiterDecision posts arbiter message and resolves dispute atomicall
     const deal = await getDeal(id);
     assert.equal(deal.state, State.COMPLETE, 'Should be COMPLETE');
 });
-
 test('arbiter CANNOT resolve with no evidence before 30 days', async () => {
     const id = await setupDeal();
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
@@ -791,7 +790,7 @@ test('arbiter resolves dispute in favor of buyer (REFUNDED)', async () => {
         args: [id, Role.Buyer, 'QmBuyerEvidence']
     });
 
-    await increaseTime(24 * 60 * 60);
+    await increaseTime(72 * 60 * 60);
 
     await sellerClient.writeContract({
         address: escrowAddress,
@@ -832,7 +831,7 @@ test('refunded/canceled proposals have zero fee', async () => {
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [id1] });
     await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id1, Role.Buyer, 'QmEvidence'] });
     await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [id1, Role.Seller, 'QmEvidence'] });
-    await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
+    await increaseTime(72 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
     await ownerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [id1, State.REFUNDED, 'QmBuyerWins'] });
 
     const id2 = await setupDeal();
@@ -891,42 +890,6 @@ test('arbiter cannot resolve dispute without buyer/seller evidence', async () =>
     );
 });
 
-test('emergency recovery initiation and execution propose payout', async () => {
-    const MATURITY_DAYS = 1n;
-    const id = await setupDeal(AMOUNT, MATURITY_DAYS);
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id]
-    });
-
-    const fastForward = EMERGENCY_RECOVERY_DELAY_SECONDS + Number(MATURITY_DAYS) * 86400 + 10;
-
-    await increaseTime(fastForward);
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'initiateEmergencyRecovery',
-        args: [id]
-    });
-
-    await increaseTime(30 * 86400 + 10);
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'executeEmergencyRecovery',
-        args: [id]
-    });
-
-    const deal = await getDeal(id);
-    assert.equal(deal.state, State.REFUNDED, 'State should be REFUNDED after recovery');
-    // Payout proposed to buyer with 5 fee
-});
-
 test('Wallet creation with 2-of-3 threshold', async () => {
     const id = await setupDeal();
 
@@ -954,59 +917,6 @@ test('no fee on refund proposal', async () => {
     await increaseTime(24 * 60 * 60); // must be >= MIN_EVIDENCE_WINDOW
     await ownerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [id, State.REFUNDED, 'Qm'] });
 
-});
-
-
-test('initiateEmergencyRecovery reverts in AWAITING_PAYMENT', async () => {
-    const id = await setupDeal(); // creates escrow, state = AWAITING_PAYMENT
-
-    // Call from buyer or seller (whoever setupDeal configures).
-    await assert.rejects(
-        () => buyerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'initiateEmergencyRecovery',
-            args: [id],
-        }),
-    );
-});
-
-
-test('initiateEmergencyRecovery succeeds in AWAITING_DELIVERY', async () => {
-    const id = await setupDeal();
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    // Now state is AWAITING_DELIVERY; this should NOT revert.
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'initiateEmergencyRecovery',
-        args: [id],
-    });
-});
-
-
-
-test('revert on emergency execution in wrong state', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'confirmDelivery', args: [id, ''] });
-
-    await assert.rejects(
-        () => buyerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'initiateEmergencyRecovery',
-            args: [id]
-        }),
-        'Invalid state for recovery'
-    );
 });
 
 
