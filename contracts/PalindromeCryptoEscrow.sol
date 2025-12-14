@@ -48,7 +48,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 amount;
         uint256 depositTime;
         uint256 maturityTime;
-        uint256 creationTime;
         uint256 disputeStartTime;
         State state;
         bool buyerCancelRequested;
@@ -475,7 +474,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         deal.arbiter = arbiter;
         deal.wallet = address(wallet);
         deal.amount = amount;
-        deal.creationTime = block.timestamp; 
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
@@ -573,7 +571,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         deal.arbiter = arbiter;
         deal.wallet = address(wallet);
         deal.amount = amount;
-        deal.creationTime = block.timestamp; 
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
@@ -608,9 +605,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     function deposit(uint256 escrowId) external nonReentrant escrowExists(escrowId) onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_PAYMENT, "Not awaiting payment");
-
-        uint256 originalDelta = deal.maturityTime - deal.creationTime;
-        deal.maturityTime = block.timestamp + originalDelta;
 
         IERC20(deal.token).safeTransferFrom(msg.sender, deal.wallet, deal.amount);
         deal.depositTime = block.timestamp;
