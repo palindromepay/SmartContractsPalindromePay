@@ -2,7 +2,7 @@
 {
   "compilerOptions": {
     "lib": ["es2023"],
-    "module": "NodeNext",
+    "module": "nodenext",
     "target": "es2022",
     "strict": true,
     "esModuleInterop": true,

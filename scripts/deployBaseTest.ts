@@ -7,7 +7,7 @@ import {
     createWalletClient,
     http,
 } from "viem";
-import { bscTestnet } from "viem/chains";
+import { baseSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "fs";
 
@@ -20,13 +20,12 @@ const EscrowArtifact = loadArtifact("./artifacts/contracts/PalindromeCryptoEscro
 const USDTArtifact = loadArtifact("./artifacts/contracts/USDT.sol/USDT.json");
 
 // === Load env variables ===
-const BSCTESTNET_RPC_URL = process.env.BSCTESTNET_RPC_URL?.trim();
-const BSCTESTNET_PRIVATE_KEY = process.env.OWNER_KEY?.trim();
-const USDT_ADDRESS = process.env.USDT_ADDRESS?.trim();
-const feeReceiver = process.env.FREE_RECEIVER?.trim()
+const BASE_SEPOLIA_RPC_URL = process.env.BASE_SEPOLIA_RPC_URL?.trim();
+const PRIVATE_KEY = process.env.OWNER_KEY?.trim();
+const feeReceiver = process.env.FREE_RECEIVER?.trim();
 
-if (!BSCTESTNET_RPC_URL || !BSCTESTNET_PRIVATE_KEY) {
-    throw new Error("Set BSCTESTNET_RPC_URL and OWNER_KEY in environment");
+if (!BASE_SEPOLIA_RPC_URL || !PRIVATE_KEY) {
+    throw new Error("Set BASE_SEPOLIA_RPC_URL and OWNER_KEY in environment");
 }
 
 function validateHexKey(key: string | undefined, label: string): `0x${string}` {
@@ -38,15 +37,15 @@ function validateHexKey(key: string | undefined, label: string): `0x${string}` {
     return stripped as `0x${string}`;
 }
 
-const privateKey = validateHexKey(BSCTESTNET_PRIVATE_KEY, "OWNER_KEY");
+const privateKey = validateHexKey(PRIVATE_KEY, "OWNER_KEY");
 const publicClient = createPublicClient({
-    chain: bscTestnet,
-    transport: http(BSCTESTNET_RPC_URL),
+    chain: baseSepolia,
+    transport: http(BASE_SEPOLIA_RPC_URL),
 });
 const deployerAccount = privateKeyToAccount(privateKey);
 const deployerClient = createWalletClient({
-    chain: bscTestnet,
-    transport: http(BSCTESTNET_RPC_URL),
+    chain: baseSepolia,
+    transport: http(BASE_SEPOLIA_RPC_URL),
     account: deployerAccount,
 });
 
@@ -65,6 +64,8 @@ async function deployContract(
 }
 
 async function main() {
+    console.log("\n========== Deploying to Base Sepolia ==========\n");
+
     const USDT_INITIAL_SUPPLY = 10_000_000n * 10n ** 6n; // 10 million tokens with 6 decimals
 
     // 1. Deploy USDT
@@ -127,14 +128,14 @@ async function main() {
     }
 
     // Summary
-    console.log("\n========== Deployment Summary ==========");
+    console.log("\n========== Base Sepolia Deployment Summary ==========");
     console.log("USDT:", usdtAddress);
     console.log("PalindromeCryptoEscrow:", escrowAddress);
     console.log("Fee Receiver:", feeReceiver);
-    console.log("=========================================");
+    console.log("=====================================================");
 }
 
 main().catch((err) => {
-    console.error("Deployment failed:", err);
+    console.error("Base Sepolia deployment failed:", err);
     process.exit(1);
 });

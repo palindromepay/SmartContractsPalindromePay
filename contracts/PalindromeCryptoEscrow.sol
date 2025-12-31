@@ -6,14 +6,23 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
 import "./PalindromeEscrowWallet.sol";
 
-/// @title PalindromeCryptoEscrow - Non-custodial escrow coordinator with custom multisig wallet
-/// @notice Coordinates escrow logic, disputes, and proposals, but does not control or move funds. Funds are held in participant-controlled 2-of-3 multisig wallets.
-/// @dev Payouts are proposed via events for off-chain signature collection and execution on the wallet.
+/**
+ * @title PalindromeCryptoEscrow
+ * @notice Trustless escrow for ERC20 token transactions with dispute resolution
+ * @dev Creates individual wallet contracts for each escrow using CREATE2.
+ *      Supports buyer/seller cancellation, arbiter-based dispute resolution,
+ *      and gasless operations via EIP-712 signatures.
+ */
 contract PalindromeCryptoEscrow is ReentrancyGuard {
     using ECDSA for bytes32;
     using SafeERC20 for IERC20;
+
+    // ---------------------------------------------------------------------
+    // Enums
+    // ---------------------------------------------------------------------
 
     enum State {
         AWAITING_PAYMENT,
@@ -23,6 +32,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         REFUNDED,
         CANCELED
     }
+
     enum Role {
         None,
         Buyer,
@@ -30,13 +40,20 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         Arbiter
     }
 
+    // ---------------------------------------------------------------------
+    // Constants
+    // ---------------------------------------------------------------------
+
     uint256 private constant _FEE_BPS = 100;
     uint256 private constant BPS_DENOMINATOR = 10_000;
-    uint256 private constant MAX_STRING_LENGTH = 100;
-    uint256 public constant DISPUTE_SHORT_TIMEOUT = 7 days;
+    uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 public constant DISPUTE_LONG_TIMEOUT = 30 days;
     uint256 public constant TIMEOUT_BUFFER = 1 hours;
     uint256 public constant GRACE_PERIOD = 24 hours;
+
+    // ---------------------------------------------------------------------
+    // Structs
+    // ---------------------------------------------------------------------
 
     struct EscrowDeal {
         address token;
@@ -52,30 +69,50 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         bool buyerCancelRequested;
         bool sellerCancelRequested;
         uint8 tokenDecimals;
+        bytes sellerWalletSig;
+        bytes buyerWalletSig;
+        bytes arbiterWalletSig;
     }
 
+    // ---------------------------------------------------------------------
+    // Immutables
+    // ---------------------------------------------------------------------
+
     address public immutable feeReceiver;
-    uint256 public nextEscrowId;
+    bytes32 public immutable WALLET_BYTECODE_HASH;
     bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
     uint256 private immutable INITIAL_CHAIN_ID;
+
+    // ---------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------
+
+    uint256 public nextEscrowId;
 
     mapping(uint256 => EscrowDeal) private escrows;
     mapping(bytes32 => bool) private usedSignatures;
     mapping(uint256 => bool) private arbiterDecisionSubmitted;
     mapping(uint256 => mapping(address => mapping(uint256 => uint256))) private nonceBitmap;
-    mapping(uint256 => uint256) public disputeStatus; 
-    mapping(uint256 => bool) private sellerSigAttached;
+    mapping(uint256 => uint256) public disputeStatus;
 
-    error InvalidMessageRoleForDispute();
+    // ---------------------------------------------------------------------
+    // Errors
+    // ---------------------------------------------------------------------
+
     error InvalidNonce();
     error SignatureAlreadyUsed();
     error SignatureLengthInvalid();
     error SignatureSInvalid();
     error SignatureVInvalid();
     error OnlyBuyer();
+    error OnlySeller();
     error OnlyArbiter();
     error OnlyBuyerOrSeller();
     error NotParticipant();
+
+    // ---------------------------------------------------------------------
+    // Events
+    // ---------------------------------------------------------------------
 
     event WalletCreated(uint256 indexed escrowId, address indexed wallet);
 
@@ -90,19 +127,27 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         string title,
         string ipfsHash
     );
+
+    event EscrowCreatedAndDeposited(
+        uint256 indexed escrowId,
+        address indexed buyer,
+        uint256 amount
+    );
+
     event PaymentDeposited(
         uint256 indexed escrowId,
         address indexed buyer,
         uint256 amount
     );
+
     event DeliveryConfirmed(
         uint256 indexed escrowId,
         address indexed buyer,
         address indexed seller,
         uint256 amount,
-        uint256 fee, 
-        string ipfsHaesh
+        uint256 fee
     );
+
     event RequestCancel(uint256 indexed escrowId, address indexed requester);
 
     event Canceled(
@@ -110,6 +155,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         address indexed initiator,
         uint256 amount
     );
+
     event DisputeStarted(uint256 indexed escrowId, address indexed initiator);
 
     event DisputeResolved(
@@ -119,6 +165,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 amount,
         uint256 fee
     );
+
     event DisputeMessagePosted(
         uint256 indexed escrowId,
         address indexed sender,
@@ -140,8 +187,23 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     );
 
     event SellerWalletSigAttached(
-        uint256 indexed escrowId, 
+        uint256 indexed escrowId,
         bytes sellerSig
+    );
+
+    event BuyerWalletSigAttached(
+        uint256 indexed escrowId,
+        bytes buyerSig
+    );
+
+    event ArbiterWalletSigAttached(
+        uint256 indexed escrowId,
+        bytes arbiterSig
+    );
+
+    event SellerAccepted(
+        uint256 indexed escrowId,
+        address indexed seller
     );
 
     event StateChanged(
@@ -150,23 +212,30 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         State indexed newState
     );
 
-    event EscrowCreatedAndDeposited(
+    event AutoReleased(
         uint256 indexed escrowId,
-        address indexed buyer,
-        uint256 amount
+        address indexed seller,
+        uint256 amount,
+        uint256 fee
     );
+
+    // ---------------------------------------------------------------------
+    // Modifiers
+    // ---------------------------------------------------------------------
 
     modifier escrowExists(uint256 escrowId) {
         require(escrowId < nextEscrowId, "Escrow does not exist");
-        require(escrows[escrowId].buyer != address(0), "Escrow not initialized");
+        require(escrows[escrowId].buyer != address(0), "Not initialized");
         _;
     }
 
     modifier onlyParticipant(uint256 escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        if (msg.sender != deal.buyer && msg.sender != deal.seller && msg.sender != deal.arbiter) {
-            revert NotParticipant();
-        }
+        if (
+            msg.sender != deal.buyer &&
+            msg.sender != deal.seller &&
+            msg.sender != deal.arbiter
+        ) revert NotParticipant();
         _;
     }
 
@@ -179,18 +248,23 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     }
 
     modifier onlyBuyer(uint256 escrowId) {
-        if (msg.sender != escrows[escrowId].buyer) {
-            revert OnlyBuyer();
-        }
+        if (msg.sender != escrows[escrowId].buyer) revert OnlyBuyer();
+        _;
+    }
+
+    modifier onlySeller(uint256 escrowId) {
+        if (msg.sender != escrows[escrowId].seller) revert OnlySeller();
         _;
     }
 
     modifier onlyArbiter(uint256 escrowId) {
-        if (msg.sender != escrows[escrowId].arbiter) {
-            revert OnlyArbiter();
-        }
+        if (msg.sender != escrows[escrowId].arbiter) revert OnlyArbiter();
         _;
     }
+
+    // ---------------------------------------------------------------------
+    // Constructor
+    // ---------------------------------------------------------------------
 
     constructor(address _feeReceiver) {
         require(_feeReceiver != address(0), "FeeTo zero");
@@ -199,15 +273,14 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
 
+        WALLET_BYTECODE_HASH = keccak256(
+            type(PalindromeEscrowWallet).creationCode
+        );
     }
 
-    function getNonceBitmap(
-        uint256 escrowId,
-        address signer,
-        uint256 bucket
-    ) external view returns (uint256) {
-        return nonceBitmap[escrowId][signer][bucket];
-    }
+    // ---------------------------------------------------------------------
+    // Views
+    // ---------------------------------------------------------------------
 
     function getEscrow(uint256 escrowId)
         external
@@ -218,7 +291,11 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         return escrows[escrowId];
     }
 
-    function getTokenDecimals(address token) internal view returns (uint8) {
+    function getTokenDecimals(address token)
+        internal
+        view
+        returns (uint8)
+    {
         try IERC20Metadata(token).decimals{gas: 30000}() returns (uint8 dec) {
             require(dec >= 6 && dec <= 18, "Unsupported decimals");
             return dec;
@@ -227,35 +304,30 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         }
     }
 
-    function _useNonce(uint256 escrowId, address signer, uint256 nonce) internal {
+    // ---------------------------------------------------------------------
+    // Internal nonce & signature guards (for *Signed coordinator calls)
+    // ---------------------------------------------------------------------
+
+    function _useNonce(
+        uint256 escrowId,
+        address signer,
+        uint256 nonce
+    ) internal {
         uint256 bucket = nonce / 256;
         uint256 bit = nonce % 256;
 
         uint256 bitmap = nonceBitmap[escrowId][signer][bucket];
         uint256 mask = 1 << bit;
 
-        if (bitmap & mask != 0) {
-            revert InvalidNonce();
-        }
+        if (bitmap & mask != 0) revert InvalidNonce();
 
         nonceBitmap[escrowId][signer][bucket] = bitmap | mask;
     }
 
-    function isNonceUsed(uint256 escrowId, address signer, uint256 nonce)
-        external
-        view
-        returns (bool) {
-        uint256 bucket = nonce / 256;
-        uint256 bit = nonce % 256;
-        uint256 bitmap = nonceBitmap[escrowId][signer][bucket];
-        uint256 mask = 1 << bit;
-        return (bitmap & mask != 0);
-    }
-
-    function _useSignature(uint256 escrowId, bytes calldata signature) internal {
-        if (signature.length != 65) {
-            revert SignatureLengthInvalid();
-        }
+    function _useSignature(uint256 escrowId, bytes calldata signature)
+        internal
+    {
+        if (signature.length != 65) revert SignatureLengthInvalid();
 
         bytes32 r;
         bytes32 s;
@@ -267,48 +339,55 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             v := byte(0, calldataload(add(signature.offset, 64)))
         }
 
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-            revert SignatureSInvalid();
-        }
-        
-        if (v != 27 && v != 28) {
-            revert SignatureVInvalid();
-        }
+        if (
+            uint256(s) >
+            0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+        ) revert SignatureSInvalid();
 
-        bytes32 canonicalSigHash = keccak256(abi.encodePacked(  address(this), escrowId, r, s, block.chainid));
-        if (usedSignatures[canonicalSigHash]) {
-            revert SignatureAlreadyUsed();
-        }
+        if (v != 27 && v != 28) revert SignatureVInvalid();
+
+        bytes32 canonicalSigHash = keccak256(
+            abi.encodePacked(address(this), escrowId, r, s, block.chainid)
+        );
+        if (usedSignatures[canonicalSigHash]) revert SignatureAlreadyUsed();
         usedSignatures[canonicalSigHash] = true;
     }
 
-    function _validateSignatureFormat(bytes calldata signature) internal pure {
-        if (signature.length != 65) {
-            revert SignatureLengthInvalid();
-        }
+    function _validateSignatureFormat(bytes calldata signature)
+        internal
+        pure
+    {
+        if (signature.length != 65) revert SignatureLengthInvalid();
         bytes32 s;
         uint8 v;
         assembly {
             s := calldataload(add(signature.offset, 32))
             v := byte(0, calldataload(add(signature.offset, 64)))
         }
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-            revert SignatureSInvalid();
-        }
-        if (v != 27 && v != 28) {
-            revert SignatureVInvalid();
-        }
+        if (
+            uint256(s) >
+            0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+        ) revert SignatureSInvalid();
+        if (v != 27 && v != 28) revert SignatureVInvalid();
     }
+
+    // ---------------------------------------------------------------------
+    // Validation helpers
+    // ---------------------------------------------------------------------
 
     function _validateIpfsLength(string calldata ipfsHash) internal pure {
         uint256 len = bytes(ipfsHash).length;
-        require(len >= 0 && len <= MAX_STRING_LENGTH, "Invalid IPFS hash length");
+        require(len <= MAX_STRING_LENGTH, "Invalid IPFS hash length");
     }
 
     function _validateTitleLength(string calldata title) internal pure {
         uint256 len = bytes(title).length;
         require(len > 0 && len <= MAX_STRING_LENGTH, "Invalid title length");
     }
+
+    // ---------------------------------------------------------------------
+    // Coordinator EIP-712 domain (for *Signed functions)
+    // ---------------------------------------------------------------------
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -342,7 +421,15 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         );
     }
 
-    function _calculateMinimumAmount(uint8 decimals) internal pure returns (uint256) {
+    // ---------------------------------------------------------------------
+    // Fee helpers
+    // ---------------------------------------------------------------------
+
+    function _calculateMinimumAmount(uint8 decimals)
+        internal
+        pure
+        returns (uint256)
+    {
         return 10 * (10 ** decimals);
     }
 
@@ -364,9 +451,13 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         }
     }
 
-    function _setFinalState(uint256 escrowId, State newState) internal {
+    // ---------------------------------------------------------------------
+    // State & payout helpers
+    // ---------------------------------------------------------------------
+
+    function _setState(uint256 escrowId, State newState) internal {
         EscrowDeal storage deal = escrows[escrowId];
-        State oldState = deal.state; 
+        State oldState = deal.state;
         deal.state = newState;
         emit StateChanged(escrowId, oldState, newState);
     }
@@ -379,37 +470,63 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
 
         if (applyFee) {
-            PalindromeEscrowWallet wallet = PalindromeEscrowWallet(deal.wallet);
-            netAmount = wallet.netAmount();
-            feeTaken = wallet.feeAmount();
-
-            require(netAmount + feeTaken == deal.amount, "Fee invariant mismatch");
+            (netAmount, feeTaken) =
+                _computeFeeAndNet(deal.amount, deal.tokenDecimals, true);
         } else {
             netAmount = deal.amount;
             feeTaken = 0;
         }
-        emit PayoutProposed(escrowId, recipient, netAmount, feeReceiver, feeTaken);
+
+        emit PayoutProposed(
+            escrowId,
+            recipient,
+            netAmount,
+            feeReceiver,
+            feeTaken
+        );
     }
 
-    function attachSellerWalletSig(uint256 escrowId, bytes calldata sellerSig) external onlyBuyerOrSeller(escrowId) {
-        require(!sellerSigAttached[escrowId], "Signature already attached");
-        sellerSigAttached[escrowId] = true;
-        emit SellerWalletSigAttached(escrowId, sellerSig);
+    // ---------------------------------------------------------------------
+    // Internal CREATE2 deploy
+    // ---------------------------------------------------------------------
+
+    function _deployWalletWithCreate2(uint256 escrowId)
+        internal
+        returns (address walletAddr)
+    {
+        bytes32 salt = keccak256(abi.encodePacked(escrowId));
+
+        bytes memory bytecode = abi.encodePacked(
+            type(PalindromeEscrowWallet).creationCode,
+            abi.encode(address(this), escrowId)
+        );
+
+        assembly ("memory-safe") {
+            let codePtr := add(bytecode, 0x20)
+            let codeSize := mload(bytecode)
+
+            walletAddr := create2(0, codePtr, codeSize, salt)
+            if iszero(walletAddr) {
+                revert(0, 0)
+            }
+        }
     }
+
+    // ---------------------------------------------------------------------
+    // Create flows
+    // ---------------------------------------------------------------------
 
     /**
-     * @notice Create a new escrow deal using a dedicated multisig wallet (no deposit yet).
-     * @dev Seller calls this to open an escrow for a given buyer and token amount.
-     *      Deploys a 2-of-3 PalindromeEscrowWallet with (buyer, seller = msg.sender,
-     *      arbiter) as owners. Funds must be deposited later via {deposit}.
-     * @param token ERC20 token used for this escrow.
-     * @param buyer Address of the buyer who will later deposit funds.
-     * @param amount Amount of tokens to be escrowed (must meet the minimum).
-     * @param maturityTimeDays Number of days from creation until timeout flows apply.
-     * @param arbiter Address of the arbiter for dispute resolution.
-     * @param title Short human-readable deal title (for frontends).
-     * @param ipfsHash IPFS hash with additional deal metadata/terms.
-     * @return escrowId Newly created escrow identifier.
+     * @notice Creates a new escrow (called by seller)
+     * @param token ERC20 token address
+     * @param buyer Buyer's address
+     * @param amount Token amount
+     * @param maturityTimeDays Days until maturity
+     * @param arbiter Arbiter's address for dispute resolution
+     * @param title Escrow title
+     * @param ipfsHash IPFS hash for additional details
+     * @param sellerWalletSig Seller's EIP-712 signature for wallet authorization
+     * @return escrowId The created escrow's ID
      */
     function createEscrow(
         address token,
@@ -418,7 +535,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 maturityTimeDays,
         address arbiter,
         string calldata title,
-        string calldata ipfsHash
+        string calldata ipfsHash,
+        bytes calldata sellerWalletSig
     ) external returns (uint256) {
         _validateTitleLength(title);
         _validateIpfsLength(ipfsHash);
@@ -428,55 +546,34 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         require(amount > 0, "Amount zero");
         require(maturityTimeDays < 3651, "Maturity too long");
 
+        require(sellerWalletSig.length == 65, "Missing seller sig");
+        _validateSignatureFormat(sellerWalletSig);
+
         uint8 decimals = getTokenDecimals(token);
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
         require(amount >= minimumAmount, "Amount too small");
 
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
 
-        (uint256 netAmount, uint256 feeAmount) = _computeFeeAndNet(amount, decimals, true);
-
-        PalindromeEscrowWallet wallet;
-        try new PalindromeEscrowWallet(
-            address(this),
-            nextEscrowId, 
-            token,
-            buyer,
-            msg.sender,  // seller
-            arbiter,
-            feeReceiver,
-            netAmount,
-            feeAmount,
-            2
-        ) returns (PalindromeEscrowWallet deployedWallet) {
-            wallet = deployedWallet;
-        } catch {
-            revert("Wallet creation failed");
-        }
-
-        bytes32 codeHash;
-        assembly {
-            codeHash := extcodehash(wallet)
-        }
-        require(codeHash != bytes32(0), "Wallet code missing");
-        require(address(wallet) != address(0), "Wallet creation failed");
-        require(wallet.isOwner(buyer), "Buyer not owner");
-        require(wallet.isOwner(msg.sender), "Seller not owner");
-
         uint256 escrowId = nextEscrowId++;
+
+        address walletAddr = _deployWalletWithCreate2(escrowId);
 
         EscrowDeal storage deal = escrows[escrowId];
         deal.token = token;
         deal.buyer = buyer;
         deal.seller = msg.sender;
         deal.arbiter = arbiter;
-        deal.wallet = address(wallet);
+        deal.wallet = walletAddr;
         deal.amount = amount;
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
 
-        emit WalletCreated(escrowId, address(wallet));
+        deal.sellerWalletSig = sellerWalletSig;
+        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+
+        emit WalletCreated(escrowId, walletAddr);
         emit EscrowCreated(
             escrowId,
             buyer,
@@ -493,19 +590,16 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Create a new escrow and immediately deposit funds into its multisig wallet.
-     * @dev Buyer calls this to open and fund an escrow in a single transaction.
-     *      Deploys a dedicated 2-of-3 PalindromeEscrowWallet with
-     *      (buyer = msg.sender, seller, arbiter) as owners, then transfers
-     *      `amount` of `token` from the buyer into that wallet.
-     * @param token ERC20 token used for this escrow.
-     * @param seller Address of the seller who will receive funds on completion.
-     * @param amount Amount of tokens to escrow (must meet the minimum amount).
-     * @param maturityTimeDays Number of days after deposit before timeout flows apply.
-     * @param arbiter Address of the arbiter for dispute resolution.
-     * @param title Short human-readable deal title (for frontends).
-     * @param ipfsHash IPFS hash with additional deal metadata/terms.
-     * @return escrowId Newly created escrow identifier.
+     * @notice Creates escrow and deposits in one transaction (called by buyer)
+     * @param token ERC20 token address
+     * @param seller Seller's address
+     * @param amount Token amount
+     * @param maturityTimeDays Days until maturity
+     * @param arbiter Arbiter's address for dispute resolution
+     * @param title Escrow title
+     * @param ipfsHash IPFS hash for additional details
+     * @param buyerWalletSig Buyer's EIP-712 signature for wallet authorization
+     * @return escrowId The created escrow's ID
      */
     function createEscrowAndDeposit(
         address token,
@@ -514,15 +608,19 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 maturityTimeDays,
         address arbiter,
         string calldata title,
-        string calldata ipfsHash
+        string calldata ipfsHash,
+        bytes calldata buyerWalletSig
     ) external nonReentrant returns (uint256 escrowId) {
         _validateTitleLength(title);
         _validateIpfsLength(ipfsHash);
         require(token != address(0), "Token zero");
-        require(seller != address(0), "Buyer zero");
+        require(seller != address(0), "Seller zero");
         require(seller != msg.sender, "Buyer seller same");
         require(amount > 0, "Amount zero");
         require(maturityTimeDays < 3651, "Maturity too long");
+
+        require(buyerWalletSig.length == 65, "Missing buyer sig");
+        _validateSignatureFormat(buyerWalletSig);
 
         uint8 decimals = getTokenDecimals(token);
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
@@ -530,50 +628,25 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
 
         require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
 
-        (uint256 netAmount, uint256 feeAmount) =
-            _computeFeeAndNet(amount, decimals, true);
-
-        PalindromeEscrowWallet wallet;
-        try new PalindromeEscrowWallet(
-            address(this),
-            nextEscrowId, 
-            token,
-            msg.sender,  // buyer
-            seller,
-            arbiter,
-            feeReceiver,
-            netAmount,
-            feeAmount,
-            2
-        ) returns (PalindromeEscrowWallet deployedWallet) {
-            wallet = deployedWallet;
-        } catch {
-            revert("Wallet creation failed");
-        }
-
-        bytes32 codeHash;
-        assembly {
-            codeHash := extcodehash(wallet)
-        }
-        require(codeHash != bytes32(0), "Wallet code missing");
-        require(address(wallet) != address(0), "Wallet creation failed");
-        require(wallet.isOwner(msg.sender), "Buyer not owner");
-        require(wallet.isOwner(seller), "Seller not owner");
-
         escrowId = nextEscrowId++;
+
+        address walletAddr = _deployWalletWithCreate2(escrowId);
 
         EscrowDeal storage deal = escrows[escrowId];
         deal.token = token;
         deal.buyer = msg.sender;
         deal.seller = seller;
         deal.arbiter = arbiter;
-        deal.wallet = address(wallet);
+        deal.wallet = walletAddr;
         deal.amount = amount;
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
 
-        emit WalletCreated(escrowId, address(wallet));
+        deal.buyerWalletSig = buyerWalletSig;
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+
+        emit WalletCreated(escrowId, walletAddr);
         emit EscrowCreated(
             escrowId,
             msg.sender,
@@ -586,146 +659,298 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             ipfsHash
         );
 
-        IERC20(token).safeTransferFrom(msg.sender, address(wallet), amount);
+        IERC20(token).safeTransferFrom(msg.sender, walletAddr, amount);
         deal.depositTime = block.timestamp;
-        deal.state = State.AWAITING_DELIVERY;
+        _setState(escrowId, State.AWAITING_DELIVERY);
 
         emit EscrowCreatedAndDeposited(escrowId, msg.sender, amount);
     }
 
-   /**
-     * @notice Deposit the escrow amount into the dedicated multisig wallet.
-     * @dev Only the buyer can call this when the escrow is in AWAITING_PAYMENT.
-     *      Transfers `deal.amount` of `deal.token` from the buyer to the
-     *      per-escrow wallet address and moves the escrow to AWAITING_DELIVERY.
-     * @param escrowId Id of the escrow to fund with the buyer's deposit.
+    // ---------------------------------------------------------------------
+    // Deposit
+    // ---------------------------------------------------------------------
+
+    /**
+     * @notice Deposits funds into an existing escrow (called by buyer)
+     * @param escrowId The escrow ID
+     * @param buyerWalletSig Buyer's EIP-712 signature for wallet authorization
      */
-    function deposit(uint256 escrowId) external nonReentrant escrowExists(escrowId) onlyBuyer(escrowId) {
+    function deposit(
+        uint256 escrowId,
+        bytes calldata buyerWalletSig
+    ) external nonReentrant escrowExists(escrowId) onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_PAYMENT, "Not awaiting payment");
 
-        IERC20(deal.token).safeTransferFrom(msg.sender, deal.wallet, deal.amount);
+        require(buyerWalletSig.length == 65, "Missing buyer sig");
+        _validateSignatureFormat(buyerWalletSig);
+        deal.buyerWalletSig = buyerWalletSig;
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+
+        IERC20(deal.token).safeTransferFrom(
+            msg.sender,
+            deal.wallet,
+            deal.amount
+        );
         deal.depositTime = block.timestamp;
-        deal.state = State.AWAITING_DELIVERY;
+        _setState(escrowId, State.AWAITING_DELIVERY);
 
         emit PaymentDeposited(escrowId, msg.sender, deal.amount);
     }
 
+    // ---------------------------------------------------------------------
+    // Seller Acceptance (for buyer-created escrows)
+    // ---------------------------------------------------------------------
+
     /**
-     * @notice Confirm delivery and complete the escrow, paying the seller.
-     * @dev Only the buyer can call this once the escrow is in AWAITING_DELIVERY.
-     *
-     * @param escrowId Id of the escrow whose delivery is being confirmed.
+     * @notice Seller accepts a buyer-created escrow and provides wallet signature
+     * @dev Required when buyer uses createEscrowAndDeposit so seller can authorize withdrawals
+     * @param escrowId The escrow ID
+     * @param sellerWalletSig Seller's EIP-712 signature for wallet authorization
      */
-    function confirmDelivery(uint256 escrowId, string calldata ipfsHaesh)
+    function acceptEscrow(
+        uint256 escrowId,
+        bytes calldata sellerWalletSig
+    ) external nonReentrant escrowExists(escrowId) {
+        EscrowDeal storage deal = escrows[escrowId];
+        require(msg.sender == deal.seller, "Only seller");
+        require(deal.state == State.AWAITING_DELIVERY, "Wrong state");
+        require(deal.sellerWalletSig.length == 0, "Already accepted");
+
+        require(sellerWalletSig.length == 65, "Missing seller sig");
+        _validateSignatureFormat(sellerWalletSig);
+        deal.sellerWalletSig = sellerWalletSig;
+
+        emit SellerAccepted(escrowId, msg.sender);
+        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+    }
+
+    // ---------------------------------------------------------------------
+    // Delivery confirmation
+    // ---------------------------------------------------------------------
+
+    /**
+     * @notice Confirms delivery and releases funds to seller (called by buyer)
+     * @param escrowId The escrow ID
+     * @param buyerWalletSig Buyer's EIP-712 signature for wallet authorization
+     */
+    function confirmDelivery(
+        uint256 escrowId,
+        bytes calldata buyerWalletSig
+    )
         external
         nonReentrant
         escrowExists(escrowId)
         onlyBuyer(escrowId)
     {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Not awaiting delivery");
+        require(
+            deal.state == State.AWAITING_DELIVERY,
+            "Not awaiting delivery"
+        );
+        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
 
-        _setFinalState(escrowId, State.COMPLETE);
+        require(buyerWalletSig.length == 65, "Missing buyer sig");
+        _validateSignatureFormat(buyerWalletSig);
+        deal.buyerWalletSig = buyerWalletSig;
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+
+        _setState(escrowId, State.COMPLETE);
 
         (, uint256 fee) = _proposePayout(escrowId, deal.seller, true);
-        emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee, ipfsHaesh);
+        emit DeliveryConfirmed(
+            escrowId,
+            deal.buyer,
+            deal.seller,
+            deal.amount,
+            fee
+        );
     }
 
+    // ---------------------------------------------------------------------
+    // Cancel flows
+    // ---------------------------------------------------------------------
+
     /**
-     * @notice Request cancellation of an active escrow; cancels immediately if both sides agree.
-     * @dev Buyer or seller calls this to mark their intent to cancel while the escrow
-     *      is in AWAITING_DELIVERY. When both buyer and seller have requested cancel,
-     * @param escrowId Id of the escrow for which cancellation is requested.
+     * @notice Requests cancellation (requires both parties for mutual cancel)
+     * @param escrowId The escrow ID
+     * @param walletSig Caller's EIP-712 signature for wallet authorization
      */
-    function requestCancel(uint256 escrowId)
+    function requestCancel(
+        uint256 escrowId,
+        bytes calldata walletSig
+    )
         external
         nonReentrant
         escrowExists(escrowId)
+        onlyBuyerOrSeller(escrowId)
+    {
+        EscrowDeal storage deal = escrows[escrowId];
+
+        require(deal.state == State.AWAITING_DELIVERY, "Wrong state");
+        require(deal.depositTime != 0, "No deposit");
+        require(deal.disputeStartTime == 0, "Dispute active");
+
+        require(walletSig.length == 65, "Missing wallet sig");
+        _validateSignatureFormat(walletSig);
+
+        bool isBuyer = (msg.sender == deal.buyer);
+
+        // Store signature and validate not already requested
+        if (isBuyer) {
+            require(!deal.buyerCancelRequested, "Buyer already requested");
+            deal.buyerWalletSig = walletSig;
+            emit BuyerWalletSigAttached(escrowId, walletSig);
+            deal.buyerCancelRequested = true;
+        } else {
+            require(!deal.sellerCancelRequested, "Seller already requested");
+            deal.sellerWalletSig = walletSig;
+            emit SellerWalletSigAttached(escrowId, walletSig);
+            deal.sellerCancelRequested = true;
+        }
+
+        // Check if mutual cancel is complete
+        if (deal.buyerCancelRequested && deal.sellerCancelRequested) {
+            require(deal.buyerWalletSig.length == 65, "Missing buyer sig");
+            require(deal.sellerWalletSig.length == 65, "Missing seller sig");
+
+            _setState(escrowId, State.CANCELED);
+            _proposePayout(escrowId, deal.buyer, false);
+
+            emit Canceled(escrowId, msg.sender, deal.amount);
+        } else {
+            emit RequestCancel(escrowId, msg.sender);
+        }
+    }
+
+    /**
+     * @notice Cancels escrow after maturity time or grace period (called by buyer)
+     * @dev If maturityTime is set, cancellation is allowed after maturityTime.
+     *      If maturityTime is not set, cancellation is allowed after depositTime + GRACE_PERIOD.
+     * @param escrowId The escrow ID
+     */
+    function cancelByTimeout(uint256 escrowId)
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlyBuyer(escrowId)
     {
         EscrowDeal storage deal = escrows[escrowId];
 
         require(
-            msg.sender == deal.buyer || msg.sender == deal.seller,
-            "Only buyer or seller"
-        );
-        require(
             deal.state == State.AWAITING_DELIVERY,
-            "Wrong state"
+            "Not awaiting delivery"
         );
-        require(deal.depositTime != 0, "No deposit");
-        require(deal.disputeStartTime == 0, "Dispute active");
-
-        bool wasBuyerRequested = deal.buyerCancelRequested;
-        bool wasSellerRequested = deal.sellerCancelRequested;
-
-        if (msg.sender == deal.buyer) {
-            require(!wasBuyerRequested, "Buyer already requested");
-            deal.buyerCancelRequested = true;
-        } else {
-            require(!wasSellerRequested, "Seller already requested");
-            deal.sellerCancelRequested = true;
-        }
-
-        if (!wasBuyerRequested || !wasSellerRequested) {
-            if (deal.buyerCancelRequested && deal.sellerCancelRequested) {
-                _setFinalState(escrowId, State.CANCELED);
-                _proposePayout(escrowId, deal.buyer, false);
-                emit Canceled(escrowId, msg.sender, deal.amount);
-            } else {
-                emit RequestCancel(escrowId, msg.sender);
-            }
-        }
-    }
-
-    /**
-     * @notice Cancel an escrow by timeout and refund the buyer if the seller does not cooperate.
-     * @dev Only the buyer can call this after requesting cancel and waiting past
-     *      maturity + GRACE_PERIOD without a dispute or mutual cancel.
-     * @param escrowId Id of the escrow to cancel by timeout.
-     */
-    function cancelByTimeout(uint256 escrowId) external nonReentrant escrowExists(escrowId) onlyBuyer(escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-
-        require(deal.state == State.AWAITING_DELIVERY, "Not awaiting delivery");
         require(deal.disputeStartTime == 0, "Dispute active");
         require(deal.buyerCancelRequested, "Must request first");
         require(!deal.sellerCancelRequested, "Mutual cancel done");
         require(deal.depositTime != 0, "No deposit");
-        require(block.timestamp > deal.maturityTime + GRACE_PERIOD, "Grace period active");
 
-       _setFinalState(escrowId, State.CANCELED);
+        // If maturityTime is set, use it directly; otherwise use depositTime + GRACE_PERIOD
+        if (deal.maturityTime != 0) {
+            require(block.timestamp > deal.maturityTime, "Maturity not reached");
+        } else {
+            require(block.timestamp > deal.depositTime + GRACE_PERIOD, "Grace period active");
+        }
+
+        require(deal.buyerWalletSig.length == 65, "Missing buyer sig");
+
+        _setState(escrowId, State.CANCELED);
 
         _proposePayout(escrowId, deal.buyer, false);
 
         emit Canceled(escrowId, msg.sender, deal.amount);
     }
 
-    function startDispute(uint256 escrowId) external nonReentrant escrowExists(escrowId) onlyBuyerOrSeller(escrowId) {
+    /**
+     * @notice Auto-releases funds to seller after maturity time or grace period if buyer hasn't confirmed
+     * @dev Seller can claim funds if:
+     *      - Escrow is in AWAITING_DELIVERY state
+     *      - No dispute has been started
+     *      - Buyer has not requested cancellation
+     *      - If maturityTime is set: maturityTime has passed
+     *      - If maturityTime is not set: depositTime + GRACE_PERIOD has passed
+     *      - Seller has provided wallet signature
+     * @param escrowId The escrow ID
+     */
+    function autoRelease(uint256 escrowId)
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlySeller(escrowId)
+    {
+        EscrowDeal storage deal = escrows[escrowId];
+
+        require(
+            deal.state == State.AWAITING_DELIVERY,
+            "Not awaiting delivery"
+        );
+        require(deal.disputeStartTime == 0, "Dispute active");
+        require(!deal.buyerCancelRequested, "Buyer requested cancel");
+        require(deal.depositTime != 0, "No deposit");
+
+        // If maturityTime is set, use it directly; otherwise use depositTime + GRACE_PERIOD
+        if (deal.maturityTime != 0) {
+            require(block.timestamp > deal.maturityTime, "Maturity not reached");
+        } else {
+            require(block.timestamp > deal.depositTime + GRACE_PERIOD, "Grace period active");
+        }
+
+        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
+
+        _setState(escrowId, State.COMPLETE);
+
+        (, uint256 fee) = _proposePayout(escrowId, deal.seller, true);
+
+        emit AutoReleased(escrowId, deal.seller, deal.amount, fee);
+    }
+
+    // ---------------------------------------------------------------------
+    // Dispute flows
+    // ---------------------------------------------------------------------
+
+    /**
+     * @notice Starts a dispute (called by buyer or seller)
+     * @param escrowId The escrow ID
+     */
+    function startDispute(uint256 escrowId)
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlyBuyerOrSeller(escrowId)
+    {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.arbiter != address(0), "Zero arbiter");
-        require(deal.state == State.AWAITING_DELIVERY, "Not awaiting delivery");
+        require(
+            deal.state == State.AWAITING_DELIVERY,
+            "Not awaiting delivery"
+        );
 
-        deal.state = State.DISPUTED;
+        _setState(escrowId, State.DISPUTED);
+
         deal.disputeStartTime = block.timestamp;
         uint256 longDeadline = deal.disputeStartTime + DISPUTE_LONG_TIMEOUT;
+
         emit DisputeDeadlinesSet(escrowId, longDeadline);
         emit DisputeStarted(escrowId, msg.sender);
     }
 
     /**
-     * @notice Post dispute evidence for the buyer or seller, stored off-chain on IPFS.
-     * @dev Only a participant in the escrow can call this, and only the buyer/seller
-     *      may post for their own role. Each side can submit at most one message.
-     * @param escrowId Id of the disputed escrow.
-     * @param role Role of the sender (must be Buyer or Seller for this function).
-     * @param ipfsHash IPFS hash pointing to the dispute message/evidence document.
+     * @notice Submits evidence for a dispute (called by buyer or seller)
+     * @param escrowId The escrow ID
+     * @param role The caller's role (Buyer or Seller)
+     * @param ipfsHash IPFS hash of the evidence
      */
     function submitDisputeMessage(
         uint256 escrowId,
         Role role,
         string calldata ipfsHash
-    ) external nonReentrant escrowExists(escrowId) onlyParticipant(escrowId) {
+    )
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlyParticipant(escrowId)
+    {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.DISPUTED, "Not disputed");
 
@@ -742,7 +967,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             require((status & 2) == 0, "Already submitted");
             status |= 2;
         } else {
-            revert InvalidMessageRoleForDispute();
+            revert("Invalid role");
         }
 
         disputeStatus[escrowId] = status;
@@ -751,17 +976,23 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     }
 
     /**
-    * @notice Submit the arbiter's final decision for a disputed escrow.
-    * @dev Only the designated arbiter can call this and only once per escrow.
-    * @param escrowId Id of the disputed escrow to resolve.
-    * @param resolution Final resolution: COMPLETE (seller payout) or REFUNDED (buyer refund).
-    * @param ipfsHash IPFS hash of the arbiter's decision/evidence document.
-    */
+     * @notice Submits arbiter's decision for a dispute
+     * @param escrowId The escrow ID
+     * @param resolution The resolution (COMPLETE or REFUNDED)
+     * @param ipfsHash IPFS hash of the decision explanation
+     * @param arbiterWalletSig Arbiter's EIP-712 signature for wallet authorization
+     */
     function submitArbiterDecision(
         uint256 escrowId,
         State resolution,
-        string calldata ipfsHash
-    ) external nonReentrant escrowExists(escrowId) onlyArbiter(escrowId) {
+        string calldata ipfsHash,
+        bytes calldata arbiterWalletSig
+    )
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlyArbiter(escrowId)
+    {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.DISPUTED, "Invalid state");
         require(
@@ -776,12 +1007,17 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             block.timestamp >
             deal.disputeStartTime + DISPUTE_LONG_TIMEOUT + TIMEOUT_BUFFER;
 
-        require(fullEvidence || longTimeout, "Require full evidence or long timeout");
+        require(fullEvidence || longTimeout, "Need evidence or timeout");
         require(!arbiterDecisionSubmitted[escrowId], "Already decided");
 
         arbiterDecisionSubmitted[escrowId] = true;
 
-        _setFinalState(escrowId, resolution);
+        require(arbiterWalletSig.length == 65, "Missing arbiter sig");
+        _validateSignatureFormat(arbiterWalletSig);
+        deal.arbiterWalletSig = arbiterWalletSig;
+        emit ArbiterWalletSigAttached(escrowId, arbiterWalletSig);
+
+        _setState(escrowId, resolution);
 
         emit DisputeMessagePosted(escrowId, msg.sender, Role.Arbiter, ipfsHash);
 
@@ -792,20 +1028,40 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
     }
 
-     /**
-     * @notice Confirm delivery via an off-chain EIP-712 signature and release funds to the seller.
-     * @dev Buyer signs a typed message off-chain; anyone (typically buyer or a relayer)
-     *      can submit it. The escrow must be in AWAITING_DELIVERY.
-     * @param escrowId Id of the escrow whose delivery is being confirmed.
-     * @param signature Buyer EIP-712 signature authorizing delivery confirmation.
-     * @param deadline Unix timestamp after which the signature is invalid.
-     * @param nonce Buyer nonce for this escrow used to prevent replay.
+    // ---------------------------------------------------------------------
+    // Signed coordinator flows
+    // ---------------------------------------------------------------------
+
+    /**
+     * @notice Confirms delivery via EIP-712 signature (gasless for buyer)
+     * @param escrowId The escrow ID
+     * @param coordSignature Coordinator's EIP-712 signature
+     * @param deadline Signature deadline
+     * @param nonce Buyer's nonce
+     * @param buyerWalletSig Buyer's wallet authorization signature
      */
-    function confirmDeliverySigned(uint256 escrowId, bytes calldata signature, uint256 deadline, uint256 nonce, string calldata ipfsHaesh) external nonReentrant escrowExists(escrowId) {
-        require(deadline > block.timestamp && deadline < block.timestamp + 1 days, "Invalid deadline");
+    function confirmDeliverySigned(
+        uint256 escrowId,
+        bytes calldata coordSignature,
+        uint256 deadline,
+        uint256 nonce,
+        bytes calldata buyerWalletSig
+    ) external nonReentrant escrowExists(escrowId) {
+        require(
+            deadline > block.timestamp &&
+                deadline < block.timestamp + 1 days,
+            "Invalid deadline"
+        );
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_DELIVERY, "Invalid state");
-        _validateSignatureFormat(signature);
+
+        require(coordSignature.length == 65, "Missing coord sig");
+        _validateSignatureFormat(coordSignature);
+
+        require(buyerWalletSig.length == 65, "Missing buyer sig");
+        _validateSignatureFormat(buyerWalletSig);
+
+        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -822,41 +1078,51 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             )
         );
 
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
 
-        address signer = ECDSA.recover(digest, signature);
+        address signer = ECDSA.recover(digest, coordSignature);
         require(signer != address(0), "Invalid recovery");
         require(signer == deal.buyer, "Unauthorized signer");
 
-        _useSignature(escrowId, signature);
+        _useSignature(escrowId, coordSignature);
         _useNonce(escrowId, deal.buyer, nonce);
 
-        _setFinalState(escrowId, State.COMPLETE);
+        deal.buyerWalletSig = buyerWalletSig;
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+
+        _setState(escrowId, State.COMPLETE);
 
         (, uint256 fee) = _proposePayout(escrowId, deal.seller, true);
 
-        emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee, ipfsHaesh);
+        emit DeliveryConfirmed(
+            escrowId,
+            deal.buyer,
+            deal.seller,
+            deal.amount,
+            fee
+        );
     }
 
     /**
-     * @notice Start a dispute for an escrow using an off-chain EIP-712 signature.
-     * @dev Buyer or seller calls this with their own signed message.
-     *      Requirements:
-     *      - Escrow must be in AWAITING_DELIVERY.
-     *      - `msg.sender` must match the recovered signer (buyer or seller).
-     *      - `deadline` must be in the future and at most 1 day from now.
-     *      - `nonce` must be unused for this (escrowId, signer) pair.
-     *      Effects:
-     *      - Marks the signature and nonce as used for replay protection.
-     *      - Sets state to DISPUTED and records `disputeStartTime`.
-     * @param escrowId Id of the escrow to dispute.
-     * @param signature Buyer/seller EIP-712 signature authorizing the dispute.
-     * @param deadline Unix timestamp after which the signature is invalid.
-     * @param nonce Per-signer nonce for this escrow used to prevent replay.
+     * @notice Starts dispute via EIP-712 signature (gasless for buyer/seller)
+     * @param escrowId The escrow ID
+     * @param signature Caller's EIP-712 signature
+     * @param deadline Signature deadline
+     * @param nonce Caller's nonce
      */
-    function startDisputeSigned(uint256 escrowId, bytes calldata signature, uint256 deadline, uint256 nonce) external nonReentrant escrowExists(escrowId) {
-        require(deadline > block.timestamp && deadline < block.timestamp + 1 days, "Invalid deadline");
-
+    function startDisputeSigned(
+        uint256 escrowId,
+        bytes calldata signature,
+        uint256 deadline,
+        uint256 nonce
+    ) external nonReentrant escrowExists(escrowId) {
+        require(
+            deadline > block.timestamp &&
+                deadline < block.timestamp + 1 days,
+            "Invalid deadline"
+        );
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_DELIVERY, "Invalid state");
         _validateSignatureFormat(signature);
@@ -876,20 +1142,97 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
             )
         );
 
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
 
         address signer = ECDSA.recover(digest, signature);
-
         require(signer != address(0), "Invalid recovery");
-        require((signer == deal.buyer) || (signer == deal.seller), "Unauthorized signer");
+        require(
+            signer == deal.buyer || signer == deal.seller,
+            "Unauthorized signer"
+        );
 
         _useSignature(escrowId, signature);
         _useNonce(escrowId, signer, nonce);
 
-        deal.state = State.DISPUTED;
+        _setState(escrowId, State.DISPUTED);
+
         deal.disputeStartTime = block.timestamp;
         uint256 longDeadline = deal.disputeStartTime + DISPUTE_LONG_TIMEOUT;
+
         emit DisputeDeadlinesSet(escrowId, longDeadline);
         emit DisputeStarted(escrowId, signer);
+    }
+
+    // ---------------------------------------------------------------------
+    // View helpers for frontend
+    // ---------------------------------------------------------------------
+
+    /**
+    * @notice Get the nonce bitmap for a given escrow/signer/word
+    * @param escrowId The escrow ID
+    * @param signer The signer's address  
+    * @param wordIndex The word index (nonce / 256)
+    * @return The bitmap where each bit represents if nonce (wordIndex*256 + bitPosition) is used
+    */
+    function getNonceBitmap(uint256 escrowId, address signer, uint256 wordIndex) external view returns (uint256) {
+        return nonceBitmap[escrowId][signer][wordIndex];
+    }
+
+    /**
+     * @notice Computes the wallet authorization digest for a participant
+     * @dev Frontend can use this to generate the correct signature
+     * @param escrowId The escrow ID
+     * @param participant The participant's address
+     * @return digest The EIP-712 digest to sign
+     */
+    function getWalletAuthorizationDigest(uint256 escrowId, address participant)
+        external
+        view
+        escrowExists(escrowId)
+        returns (bytes32 digest)
+    {
+        EscrowDeal storage deal = escrows[escrowId];
+        require(
+            participant == deal.buyer ||
+            participant == deal.seller ||
+            participant == deal.arbiter,
+            "Not a participant"
+        );
+
+        bytes32 WALLET_AUTHORIZATION_TYPEHASH = keccak256(
+            "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
+        );
+
+        bytes32 walletDomainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("PalindromeEscrowWallet")),
+                keccak256(bytes("1")),
+                block.chainid,
+                deal.wallet
+            )
+        );
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                WALLET_AUTHORIZATION_TYPEHASH,
+                escrowId,
+                deal.wallet,
+                participant
+            )
+        );
+
+        digest = keccak256(
+            abi.encodePacked("\x19\x01", walletDomainSeparator, structHash)
+        );
+    }
+
+    /**
+     * @notice Returns the escrow contract's domain separator
+     */
+    function DOMAIN_SEPARATOR() external view returns (bytes32) {
+        return _domainSeparator();
     }
 }
