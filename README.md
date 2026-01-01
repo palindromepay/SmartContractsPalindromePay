@@ -1,8 +1,6 @@
 # Crypto Pay & Escrow by Palindrome Finance
 
-**Palindrome Finance** is a **secure crypto payment protocol with built-in multisig-escrow**, engineered for **trustless, protected digital transactions**.
-
-Our **smart contract escrow system** ensures funds are released only when conditions are met — eliminating chargebacks and counterparty + fraud.
+**Palindrome Finance** enables secure crypto transactions between strangers. Our 2-of-3 multisig escrow holds funds until delivery is confirmed, protecting both buyers and sellers without custodial risk.
 
 [www.palindromefinance.com](https://www.palindromefinance.com)
 
