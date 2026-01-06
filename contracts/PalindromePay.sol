@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.29;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-
-import "./PalindromePayWallet.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {PalindromePayWallet} from "./PalindromePayWallet.sol";
 
 /**
  * @title PalindromePay
@@ -92,7 +91,7 @@ contract PalindromePay is ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /// @notice Address receiving platform fees
-    address public immutable feeReceiver;
+    address public immutable FEE_RECEIVER;
 
     /// @notice Keccak256 hash of wallet contract bytecode for CREATE2
     bytes32 public immutable WALLET_BYTECODE_HASH;
@@ -324,6 +323,14 @@ contract PalindromePay is ReentrancyGuard {
         address indexed seller
     );
 
+    /// @notice Emitted when seller updates their wallet signature
+    /// @param escrowId The unique escrow identifier
+    /// @param sellerSig The new seller's signature
+    event SellerWalletSigUpdated(
+        uint256 indexed escrowId,
+        bytes sellerSig
+    );
+
     /// @notice Emitted when escrow state changes
     /// @param escrowId The unique escrow identifier
     /// @param oldState The previous state
@@ -347,57 +354,87 @@ contract PalindromePay is ReentrancyGuard {
     );
 
     // ---------------------------------------------------------------------
-    // Modifiers
+    // Modifiers (with internal functions to reduce bytecode)
     // ---------------------------------------------------------------------
+
+    /// @dev Internal function for escrowExists modifier
+    function _escrowExists(uint256 escrowId) internal view {
+        require(escrowId < nextEscrowId, "Escrow does not exist");
+        require(escrows[escrowId].buyer != address(0), "Not initialized");
+    }
 
     /// @notice Ensures the escrow exists and is initialized
     /// @param escrowId The escrow ID to check
     modifier escrowExists(uint256 escrowId) {
-        require(escrowId < nextEscrowId, "Escrow does not exist");
-        require(escrows[escrowId].buyer != address(0), "Not initialized");
+        _escrowExists(escrowId);
         _;
     }
 
-    /// @notice Restricts access to escrow participants only
-    /// @param escrowId The escrow ID
-    modifier onlyParticipant(uint256 escrowId) {
+    /// @dev Internal function for onlyParticipant modifier
+    function _onlyParticipant(uint256 escrowId) internal view {
         EscrowDeal storage deal = escrows[escrowId];
         if (
             msg.sender != deal.buyer &&
             msg.sender != deal.seller &&
             msg.sender != deal.arbiter
         ) revert NotParticipant();
+    }
+
+    /// @notice Restricts access to escrow participants only
+    /// @param escrowId The escrow ID
+    modifier onlyParticipant(uint256 escrowId) {
+        _onlyParticipant(escrowId);
         _;
+    }
+
+    /// @dev Internal function for onlyBuyerOrSeller modifier
+    function _onlyBuyerOrSeller(uint256 escrowId) internal view {
+        EscrowDeal storage deal = escrows[escrowId];
+        if (msg.sender != deal.buyer && msg.sender != deal.seller) {
+            revert OnlyBuyerOrSeller();
+        }
     }
 
     /// @notice Restricts access to buyer or seller only
     /// @param escrowId The escrow ID
     modifier onlyBuyerOrSeller(uint256 escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        if (msg.sender != deal.buyer && msg.sender != deal.seller) {
-            revert OnlyBuyerOrSeller();
-        }
+        _onlyBuyerOrSeller(escrowId);
         _;
+    }
+
+    /// @dev Internal function for onlyBuyer modifier
+    function _onlyBuyer(uint256 escrowId) internal view {
+        if (msg.sender != escrows[escrowId].buyer) revert OnlyBuyer();
     }
 
     /// @notice Restricts access to buyer only
     /// @param escrowId The escrow ID
     modifier onlyBuyer(uint256 escrowId) {
-        if (msg.sender != escrows[escrowId].buyer) revert OnlyBuyer();
+        _onlyBuyer(escrowId);
         _;
+    }
+
+    /// @dev Internal function for onlySeller modifier
+    function _onlySeller(uint256 escrowId) internal view {
+        if (msg.sender != escrows[escrowId].seller) revert OnlySeller();
     }
 
     /// @notice Restricts access to seller only
     /// @param escrowId The escrow ID
     modifier onlySeller(uint256 escrowId) {
-        if (msg.sender != escrows[escrowId].seller) revert OnlySeller();
+        _onlySeller(escrowId);
         _;
+    }
+
+    /// @dev Internal function for onlyArbiter modifier
+    function _onlyArbiter(uint256 escrowId) internal view {
+        if (msg.sender != escrows[escrowId].arbiter) revert OnlyArbiter();
     }
 
     /// @notice Restricts access to arbiter only
     /// @param escrowId The escrow ID
     modifier onlyArbiter(uint256 escrowId) {
-        if (msg.sender != escrows[escrowId].arbiter) revert OnlyArbiter();
+        _onlyArbiter(escrowId);
         _;
     }
 
@@ -409,7 +446,7 @@ contract PalindromePay is ReentrancyGuard {
     /// @param _feeReceiver Address to receive platform fees
     constructor(address _feeReceiver) {
         require(_feeReceiver != address(0), "FeeTo zero");
-        feeReceiver = _feeReceiver;
+        FEE_RECEIVER = _feeReceiver;
 
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
@@ -666,7 +703,7 @@ contract PalindromePay is ReentrancyGuard {
             escrowId,
             recipient,
             netAmount,
-            feeReceiver,
+            FEE_RECEIVER,
             feeTaken
         );
     }
@@ -760,9 +797,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.tokenDecimals = decimals;
 
         deal.sellerWalletSig = sellerWalletSig;
-        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
 
-        emit WalletCreated(escrowId, walletAddr);
         emit EscrowCreated(
             escrowId,
             buyer,
@@ -774,6 +809,8 @@ contract PalindromePay is ReentrancyGuard {
             title,
             ipfsHash
         );
+        emit WalletCreated(escrowId, walletAddr);
+        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
 
         return escrowId;
     }
@@ -834,9 +871,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.tokenDecimals = decimals;
 
         deal.buyerWalletSig = buyerWalletSig;
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
-        emit WalletCreated(escrowId, walletAddr);
         emit EscrowCreated(
             escrowId,
             msg.sender,
@@ -848,6 +883,8 @@ contract PalindromePay is ReentrancyGuard {
             title,
             ipfsHash
         );
+        emit WalletCreated(escrowId, walletAddr);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
         IERC20(token).safeTransferFrom(msg.sender, walletAddr, amount);
         deal.depositTime = block.timestamp;
@@ -906,17 +943,18 @@ contract PalindromePay is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
         require(msg.sender == deal.seller, "Only seller");
         require(deal.state == State.AWAITING_DELIVERY, "Wrong state");
-
-        // Only for buyer-created escrows (createEscrowAndDeposit flow)
-        // In createEscrow flow, seller already provided signature at creation
-        require(deal.sellerWalletSig.length == 0, "Already accepted");
-
         require(sellerWalletSig.length == 65, "Missing seller sig");
         _validateSignatureFormat(sellerWalletSig);
+
+        bool isUpdate = deal.sellerWalletSig.length > 0;
         deal.sellerWalletSig = sellerWalletSig;
 
-        emit SellerAccepted(escrowId, msg.sender);
-        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+        if (isUpdate) {
+            emit SellerWalletSigUpdated(escrowId, sellerWalletSig);
+        } else {
+            emit SellerAccepted(escrowId, msg.sender);
+            emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1388,7 +1426,7 @@ contract PalindromePay is ReentrancyGuard {
             "Not a participant"
         );
 
-        bytes32 WALLET_AUTHORIZATION_TYPEHASH = keccak256(
+        bytes32 walletAuthorizationTypehash = keccak256(
             "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
         );
 
@@ -1404,7 +1442,7 @@ contract PalindromePay is ReentrancyGuard {
 
         bytes32 structHash = keccak256(
             abi.encode(
-                WALLET_AUTHORIZATION_TYPEHASH,
+                walletAuthorizationTypehash,
                 escrowId,
                 deal.wallet,
                 participant

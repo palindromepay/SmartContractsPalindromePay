@@ -8,7 +8,9 @@
     "node": "hardhat node",
     "deployLocal": "ts-node scripts/deployTest.ts",
     "deployBSCTest": "ts-node scripts/deployBSCTest.ts",
-    "reset": "npm run clean && npm run compile"
+    "reset": "npm run clean && npm run compile",
+    "forge:clean": "rimraf cache out",
+    "forge:build": "npm run forge:clean && forge build -q"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.0.3",

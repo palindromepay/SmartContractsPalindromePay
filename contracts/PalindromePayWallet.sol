@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.29;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface IPalindromePay {
     enum State {
@@ -82,10 +82,10 @@ contract PalindromePayWallet is ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /// @notice The escrow contract that controls this wallet
-    address public immutable escrowContract;
+    address public immutable ESCROW_CONTRACT;
 
     /// @notice The escrow ID this wallet belongs to
-    uint256 public immutable escrowId;
+    uint256 public immutable ESCROW_ID;
 
     /// @dev Cached domain separator for gas optimization
     bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
@@ -166,8 +166,8 @@ contract PalindromePayWallet is ReentrancyGuard {
      */
     constructor(address _escrowContract, uint256 _escrowId) {
         require(_escrowContract != address(0), "Escrow zero");
-        escrowContract = _escrowContract;
-        escrowId = _escrowId;
+        ESCROW_CONTRACT = _escrowContract;
+        ESCROW_ID = _escrowId;
 
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
@@ -212,7 +212,7 @@ contract PalindromePayWallet is ReentrancyGuard {
         bytes32 structHash = keccak256(
             abi.encode(
                 WALLET_AUTHORIZATION_TYPEHASH,
-                escrowId,
+                ESCROW_ID,
                 address(this),
                 participant
             )
@@ -324,8 +324,8 @@ contract PalindromePayWallet is ReentrancyGuard {
     function withdraw() external nonReentrant {
         if (withdrawn) revert AlreadyWithdrawn();
 
-        IPalindromePay escrow = IPalindromePay(escrowContract);
-        IPalindromePay.EscrowDeal memory deal = escrow.getEscrow(escrowId);
+        IPalindromePay escrow = IPalindromePay(ESCROW_CONTRACT);
+        IPalindromePay.EscrowDeal memory deal = escrow.getEscrow(ESCROW_ID);
 
         // Validate escrow is in final state
         IPalindromePay.State state = deal.state;
@@ -380,7 +380,7 @@ contract PalindromePayWallet is ReentrancyGuard {
             // Transfer net amount to seller
             token.safeTransfer(recipient, netAmount);
 
-            emit Withdrawn(escrowId, recipient, netAmount, feeTo, feeAmount);
+            emit Withdrawn(ESCROW_ID, recipient, netAmount, feeTo, feeAmount);
         } else {
             // Buyer receives full refund (REFUNDED or CANCELED)
             recipient = deal.buyer;
@@ -389,7 +389,7 @@ contract PalindromePayWallet is ReentrancyGuard {
 
             token.safeTransfer(recipient, netAmount);
 
-            emit Withdrawn(escrowId, recipient, netAmount, address(0), 0);
+            emit Withdrawn(ESCROW_ID, recipient, netAmount, address(0), 0);
         }
 
         // Verify wallet is empty (safety check)
@@ -406,7 +406,7 @@ contract PalindromePayWallet is ReentrancyGuard {
      */
     function getBalance() external view returns (uint256) {
         IPalindromePay.EscrowDeal memory deal =
-            IPalindromePay(escrowContract).getEscrow(escrowId);
+            IPalindromePay(ESCROW_CONTRACT).getEscrow(ESCROW_ID);
 
         if (deal.token == address(0)) return 0;
         return IERC20(deal.token).balanceOf(address(this));
@@ -439,7 +439,7 @@ contract PalindromePayWallet is ReentrancyGuard {
      */
     function getValidSignatureCount() external view returns (uint256 count) {
         IPalindromePay.EscrowDeal memory deal =
-            IPalindromePay(escrowContract).getEscrow(escrowId);
+            IPalindromePay(ESCROW_CONTRACT).getEscrow(ESCROW_ID);
         return _countValidSignatures(deal);
     }
 
@@ -450,7 +450,7 @@ contract PalindromePayWallet is ReentrancyGuard {
      */
     function isSignatureValid(address participant) external view returns (bool) {
         IPalindromePay.EscrowDeal memory deal =
-            IPalindromePay(escrowContract).getEscrow(escrowId);
+            IPalindromePay(ESCROW_CONTRACT).getEscrow(ESCROW_ID);
 
         if (participant == deal.buyer) {
             return _isValidSignature(deal.buyerWalletSig, deal.buyer);
