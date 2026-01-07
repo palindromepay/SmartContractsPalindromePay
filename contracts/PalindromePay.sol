@@ -969,11 +969,13 @@ contract PalindromePay is ReentrancyGuard {
         emit WalletCreated(escrowId, walletAddr);
         emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
-        IERC20(token).safeTransferFrom(msg.sender, walletAddr, amount);
+        // Effects before interactions (CEI pattern)
         deal.depositTime = block.timestamp;
         _setState(escrowId, State.AWAITING_DELIVERY);
-
         emit EscrowCreatedAndDeposited(escrowId, msg.sender, amount);
+
+        // External call last
+        IERC20(token).safeTransferFrom(msg.sender, walletAddr, amount);
     }
 
     // ---------------------------------------------------------------------
@@ -999,15 +1001,17 @@ contract PalindromePay is ReentrancyGuard {
         deal.buyerWalletSig = buyerWalletSig;
         emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
+        // Effects before interactions (CEI pattern)
+        deal.depositTime = block.timestamp;
+        _setState(escrowId, State.AWAITING_DELIVERY);
+        emit PaymentDeposited(escrowId, msg.sender, deal.amount);
+
+        // External call last
         IERC20(deal.token).safeTransferFrom(
             msg.sender,
             deal.wallet,
             deal.amount
         );
-        deal.depositTime = block.timestamp;
-        _setState(escrowId, State.AWAITING_DELIVERY);
-
-        emit PaymentDeposited(escrowId, msg.sender, deal.amount);
     }
 
     // ---------------------------------------------------------------------
