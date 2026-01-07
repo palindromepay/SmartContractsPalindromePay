@@ -143,6 +143,9 @@ contract PalindromePay is ReentrancyGuard {
     /// @notice Thrown when signature 'v' value is not 27 or 28
     error SignatureVInvalid();
 
+    /// @notice Thrown when a wallet authorization signature is invalid
+    error InvalidWalletSignature();
+
     /// @notice Thrown when caller is not the buyer
     error OnlyBuyer();
 
@@ -564,6 +567,64 @@ contract PalindromePay is ReentrancyGuard {
         if (v != 27 && v != 28) revert SignatureVInvalid();
     }
 
+    /// @dev Verifies a wallet authorization signature
+    /// @param signature The 65-byte signature
+    /// @param escrowId The escrow ID
+    /// @param walletAddr The wallet address (can be predicted)
+    /// @param expectedSigner The address that should have signed
+    /// @return True if signature is valid
+    function _verifyWalletSignature(
+        bytes calldata signature,
+        uint256 escrowId,
+        address walletAddr,
+        address expectedSigner
+    ) internal view returns (bool) {
+        if (signature.length != 65) return false;
+        if (expectedSigner == address(0)) return false;
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        assembly {
+            r := calldataload(add(signature.offset, 0))
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+
+        // Check s is in lower half of curve order (EIP-2)
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            return false;
+        }
+        if (v != 27 && v != 28) return false;
+
+        // Compute digest (same as PalindromePayWallet._computeDigest)
+        bytes32 walletAuthorizationTypehash = keccak256(
+            "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
+        );
+
+        bytes32 walletDomainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("PalindromePayWallet")),
+                keccak256(bytes("1")),
+                block.chainid,
+                walletAddr
+            )
+        );
+
+        bytes32 structHash = keccak256(
+            abi.encode(walletAuthorizationTypehash, escrowId, walletAddr, expectedSigner)
+        );
+
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", walletDomainSeparator, structHash)
+        );
+
+        address recovered = ECDSA.recover(digest, v, r, s);
+        return recovered == expectedSigner;
+    }
+
     // ---------------------------------------------------------------------
     // Validation helpers
     // ---------------------------------------------------------------------
@@ -712,6 +773,22 @@ contract PalindromePay is ReentrancyGuard {
     // Internal CREATE2 deploy
     // ---------------------------------------------------------------------
 
+    /// @dev Predicts wallet address for a given escrow ID (before deployment)
+    /// @param escrowId The escrow ID used as salt
+    /// @return predicted The predicted wallet contract address
+    function _predictWalletAddress(uint256 escrowId) internal view returns (address predicted) {
+        bytes32 salt = keccak256(abi.encodePacked(escrowId));
+        bytes32 bytecodeHash = keccak256(
+            abi.encodePacked(
+                type(PalindromePayWallet).creationCode,
+                abi.encode(address(this), escrowId)
+            )
+        );
+        predicted = address(uint160(uint256(keccak256(
+            abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)
+        ))));
+    }
+
     /// @dev Deploys a new escrow wallet using CREATE2 for deterministic addresses
     /// @param escrowId The escrow ID used as salt
     /// @return walletAddr The deployed wallet contract address
@@ -771,9 +848,6 @@ contract PalindromePay is ReentrancyGuard {
         require(amount > 0, "Amount zero");
         require(maturityTimeDays < 3651, "Maturity too long");
 
-        require(sellerWalletSig.length == 65, "Missing seller sig");
-        _validateSignatureFormat(sellerWalletSig);
-
         uint8 decimals = getTokenDecimals(token);
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
         require(amount >= minimumAmount, "Amount too small");
@@ -781,6 +855,12 @@ contract PalindromePay is ReentrancyGuard {
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
 
         uint256 escrowId = nextEscrowId++;
+        address predictedWallet = _predictWalletAddress(escrowId);
+
+        // Verify seller signature before deploying wallet
+        if (!_verifyWalletSignature(sellerWalletSig, escrowId, predictedWallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
 
         address walletAddr = _deployWalletWithCreate2(escrowId);
 
@@ -845,9 +925,6 @@ contract PalindromePay is ReentrancyGuard {
         require(amount > 0, "Amount zero");
         require(maturityTimeDays < 3651, "Maturity too long");
 
-        require(buyerWalletSig.length == 65, "Missing buyer sig");
-        _validateSignatureFormat(buyerWalletSig);
-
         uint8 decimals = getTokenDecimals(token);
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
         require(amount >= minimumAmount, "Amount too small");
@@ -855,6 +932,12 @@ contract PalindromePay is ReentrancyGuard {
         require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
 
         escrowId = nextEscrowId++;
+        address predictedWallet = _predictWalletAddress(escrowId);
+
+        // Verify buyer signature before deploying wallet
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, predictedWallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
 
         address walletAddr = _deployWalletWithCreate2(escrowId);
 
@@ -909,8 +992,10 @@ contract PalindromePay is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_PAYMENT, "Not awaiting payment");
 
-        require(buyerWalletSig.length == 65, "Missing buyer sig");
-        _validateSignatureFormat(buyerWalletSig);
+        // Verify buyer signature (wallet already exists)
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
         deal.buyerWalletSig = buyerWalletSig;
         emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
@@ -943,8 +1028,11 @@ contract PalindromePay is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
         require(msg.sender == deal.seller, "Only seller");
         require(deal.state == State.AWAITING_DELIVERY, "Wrong state");
-        require(sellerWalletSig.length == 65, "Missing seller sig");
-        _validateSignatureFormat(sellerWalletSig);
+
+        // Verify seller signature (wallet already exists)
+        if (!_verifyWalletSignature(sellerWalletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
 
         bool isUpdate = deal.sellerWalletSig.length > 0;
         deal.sellerWalletSig = sellerWalletSig;
@@ -982,8 +1070,10 @@ contract PalindromePay is ReentrancyGuard {
         );
         require(deal.sellerWalletSig.length == 65, "Missing seller sig");
 
-        require(buyerWalletSig.length == 65, "Missing buyer sig");
-        _validateSignatureFormat(buyerWalletSig);
+        // Verify buyer signature (wallet already exists)
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
         deal.buyerWalletSig = buyerWalletSig;
         emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
@@ -1023,8 +1113,10 @@ contract PalindromePay is ReentrancyGuard {
         require(deal.depositTime != 0, "No deposit");
         require(deal.disputeStartTime == 0, "Dispute active");
 
-        require(walletSig.length == 65, "Missing wallet sig");
-        _validateSignatureFormat(walletSig);
+        // Verify wallet signature (wallet already exists)
+        if (!_verifyWalletSignature(walletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
 
         bool isBuyer = (msg.sender == deal.buyer);
 
@@ -1237,8 +1329,10 @@ contract PalindromePay is ReentrancyGuard {
 
         arbiterDecisionSubmitted[escrowId] = true;
 
-        require(arbiterWalletSig.length == 65, "Missing arbiter sig");
-        _validateSignatureFormat(arbiterWalletSig);
+        // Verify arbiter signature (wallet already exists)
+        if (!_verifyWalletSignature(arbiterWalletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
         deal.arbiterWalletSig = arbiterWalletSig;
         emit ArbiterWalletSigAttached(escrowId, arbiterWalletSig);
 
