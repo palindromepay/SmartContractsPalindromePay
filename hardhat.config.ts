@@ -38,6 +38,14 @@ const config: HardhatUserConfig = {
       accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
       chainType: "op",
     },
+    // Ethereum Sepolia (testnet)
+    sepolia: {
+      type: "http",
+      chainId: 11155111,
+      url: process.env.ETH_SEPOLIA_RPC_URL || "https://rpc.sepolia.org",
+      accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
+      chainType: "l1",
+    },
     // BSC Mainnet
     bsc: {
       type: "http",
@@ -54,32 +62,14 @@ const config: HardhatUserConfig = {
       accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
       chainType: "op",
     },
-  },
-  etherscan: {
-    apiKey: {
-      bscTestnet: process.env.BSCSCAN_API_KEY || "",
-      bsc: process.env.BSCSCAN_API_KEY || "",
-      baseSepolia: process.env.BASESCAN_API_KEY || "",
-      base: process.env.BASESCAN_API_KEY || "",
+    // Ethereum Mainnet
+    mainnet: {
+      type: "http",
+      chainId: 1,
+      url: process.env.ETH_RPC_URL || "https://eth.llamarpc.com",
+      accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
+      chainType: "l1",
     },
-    customChains: [
-      {
-        network: "baseSepolia",
-        chainId: 84532,
-        urls: {
-          apiURL: "https://api-sepolia.basescan.org/api",
-          browserURL: "https://sepolia.basescan.org",
-        },
-      },
-      {
-        network: "base",
-        chainId: 8453,
-        urls: {
-          apiURL: "https://api.basescan.org/api",
-          browserURL: "https://basescan.org",
-        },
-      },
-    ],
   },
 };
 

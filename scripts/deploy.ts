@@ -9,9 +9,13 @@
  *   # Deploy both USDT + PalindromePay with verification
  *   npx ts-node scripts/deploy.ts base-test
  *   npx ts-node scripts/deploy.ts bsc-test
+ *   npx ts-node scripts/deploy.ts eth-test
  *
  *   # Deploy only PalindromePay (skip USDT)
  *   npx ts-node scripts/deploy.ts base-test --escrow-only
+ *
+ *   # Deploy only USDT (skip PalindromePay)
+ *   npx ts-node scripts/deploy.ts base-test --usdt-only
  *
  *   # Deploy without verification
  *   npx ts-node scripts/deploy.ts base-test --no-verify
@@ -21,20 +25,23 @@
  *
  * Networks:
  *   local       - Local Hardhat node (http://127.0.0.1:8545)
+ *   eth-test    - Ethereum Sepolia (testnet)
  *   base-test   - Base Sepolia (testnet)
  *   bsc-test    - BSC Testnet
+ *   eth         - Ethereum Mainnet
  *   base        - Base Mainnet
  *   bsc         - BSC Mainnet
  *
  * Required Environment Variables:
- *   OWNER_KEY           - Deployer private key (not needed for local)
- *   FREE_RECEIVER       - Fee receiver address (not needed for local)
- *   BSCTESTNET_RPC_URL  - BSC Testnet RPC URL
+ *   OWNER_KEY            - Deployer private key (not needed for local)
+ *   FREE_RECEIVER        - Fee receiver address (not needed for local)
+ *   ETH_SEPOLIA_RPC_URL  - Ethereum Sepolia RPC URL
+ *   ETH_RPC_URL          - Ethereum Mainnet RPC URL
+ *   BSCTESTNET_RPC_URL   - BSC Testnet RPC URL
  *   BASE_SEPOLIA_RPC_URL - Base Sepolia RPC URL
- *   BSC_RPC_URL         - BSC Mainnet RPC URL
- *   BASE_RPC_URL        - Base Mainnet RPC URL
- *   BSCSCAN_API_KEY     - BSCScan API key for verification
- *   BASESCAN_API_KEY    - BaseScan API key for verification
+ *   BSC_RPC_URL          - BSC Mainnet RPC URL
+ *   BASE_RPC_URL         - Base Mainnet RPC URL
+ *   ETHERSCAN_API_KEY    - Etherscan V2 API key (works for all chains)
  */
 
 import * as dotenv from "dotenv";
@@ -50,7 +57,7 @@ import {
     type Account,
     type Hex,
 } from "viem";
-import { bscTestnet, baseSepolia, bsc, base, hardhat } from "viem/chains";
+import { bscTestnet, baseSepolia, bsc, base, hardhat, sepolia, mainnet } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "fs";
 import { execSync } from "child_process";
@@ -86,29 +93,43 @@ const NETWORKS: Record<string, NetworkConfig> = {
         chain: bscTestnet,
         rpcUrl: process.env.BSCTESTNET_RPC_URL || "",
         explorerApiUrl: "https://api-testnet.bscscan.com/api",
-        explorerApiKey: process.env.BSCSCAN_API_KEY || "",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
         explorerUrl: "https://testnet.bscscan.com",
     },
     "base-test": {
         chain: baseSepolia,
         rpcUrl: process.env.BASE_SEPOLIA_RPC_URL || "",
         explorerApiUrl: "https://api-sepolia.basescan.org/api",
-        explorerApiKey: process.env.BASESCAN_API_KEY || "",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
         explorerUrl: "https://sepolia.basescan.org",
+    },
+    "eth-test": {
+        chain: sepolia,
+        rpcUrl: process.env.ETH_SEPOLIA_RPC_URL || "",
+        explorerApiUrl: "https://api-sepolia.etherscan.io/api",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
+        explorerUrl: "https://sepolia.etherscan.io",
     },
     "bsc": {
         chain: bsc,
         rpcUrl: process.env.BSC_RPC_URL || "",
         explorerApiUrl: "https://api.bscscan.com/api",
-        explorerApiKey: process.env.BSCSCAN_API_KEY || "",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
         explorerUrl: "https://bscscan.com",
     },
     "base": {
         chain: base,
         rpcUrl: process.env.BASE_RPC_URL || "",
         explorerApiUrl: "https://api.basescan.org/api",
-        explorerApiKey: process.env.BASESCAN_API_KEY || "",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
         explorerUrl: "https://basescan.org",
+    },
+    "eth": {
+        chain: mainnet,
+        rpcUrl: process.env.ETH_RPC_URL || "",
+        explorerApiUrl: "https://api.etherscan.io/api",
+        explorerApiKey: process.env.ETHERSCAN_API_KEY || "",
+        explorerUrl: "https://etherscan.io",
     },
 };
 
@@ -152,19 +173,24 @@ Usage: npx ts-node scripts/deploy.ts <network> [options]
 
 Networks:
   local       - Local Hardhat node (http://127.0.0.1:8545)
+  eth-test    - Ethereum Sepolia (testnet)
   base-test   - Base Sepolia (testnet)
   bsc-test    - BSC Testnet
+  eth         - Ethereum Mainnet
   base        - Base Mainnet
   bsc         - BSC Mainnet
 
 Options:
   --escrow-only  - Deploy only PalindromePay (skip USDT)
+  --usdt-only    - Deploy only USDT (skip PalindromePay)
   --no-verify    - Skip contract verification
   --with-usdt    - Deploy test USDT token (default for testnets/local)
 
 Examples:
   npx ts-node scripts/deploy.ts local                             # Local: USDT + Escrow
   npx ts-node scripts/deploy.ts local --escrow-only               # Local: only Escrow
+  npx ts-node scripts/deploy.ts base-test --usdt-only             # Deploy only USDT
+  npx ts-node scripts/deploy.ts eth-test                          # Deploy USDT + Escrow with verify
   npx ts-node scripts/deploy.ts base-test                         # Deploy USDT + Escrow with verify
   npx ts-node scripts/deploy.ts base-test --escrow-only           # Deploy only Escrow
   npx ts-node scripts/deploy.ts bsc-test --no-verify              # Deploy without verification
@@ -250,8 +276,10 @@ async function verifyContract(
 
 function getHardhatNetwork(chainId: number): string {
     const mapping: Record<number, string> = {
+        1: "mainnet",
         97: "bscTestnet",
         84532: "baseSepolia",
+        11155111: "sepolia",
         56: "bsc",
         8453: "base",
     };
@@ -273,6 +301,7 @@ async function main() {
 
     const networkName = args[0];
     const escrowOnly = args.includes("--escrow-only");
+    const usdtOnly = args.includes("--usdt-only");
     const skipVerify = args.includes("--no-verify");
     const withUsdt = args.includes("--with-usdt");
 
@@ -284,10 +313,16 @@ async function main() {
         process.exit(1);
     }
 
-    // Determine if we should deploy USDT
-    // Default: deploy USDT on testnets/local unless --escrow-only is specified
+    // Validate mutually exclusive options
+    if (escrowOnly && usdtOnly) {
+        console.error(`${colors.red}Error: Cannot use --escrow-only and --usdt-only together${colors.reset}`);
+        process.exit(1);
+    }
+
+    // Determine what to deploy
     const isTestnet = networkName.includes("test") || networkName === "local";
-    const deployUsdt = !escrowOnly && (withUsdt || isTestnet);
+    const deployUsdt = usdtOnly || (!escrowOnly && (withUsdt || isTestnet));
+    const deployEscrow = !usdtOnly;
 
     // Local network automatically skips verification
     const shouldSkipVerify = skipVerify || network.isLocal;
@@ -302,6 +337,7 @@ async function main() {
     console.log(`  Network:      ${networkName}`);
     console.log(`  Chain ID:     ${network.chain.id}`);
     console.log(`  Deploy USDT:  ${deployUsdt ? "Yes" : "No"}`);
+    console.log(`  Deploy Escrow: ${deployEscrow ? "Yes" : "No"}`);
     console.log(`  Verify:       ${shouldSkipVerify ? "No" : "Yes"}`);
     console.log("========================================\n");
 
@@ -349,8 +385,8 @@ async function main() {
     }
 
     let usdtAddress: Hex | undefined;
-    let escrowAddress: Hex;
-    let startBlock: bigint;
+    let escrowAddress: Hex | undefined;
+    let startBlock: bigint | undefined;
 
     // Deploy USDT if requested
     if (deployUsdt) {
@@ -385,35 +421,37 @@ async function main() {
         }
     }
 
-    // Deploy PalindromePay
-    console.log("--- Deploying PalindromePay ---");
-    const escrowArgs = [feeReceiver];
+    // Deploy PalindromePay if requested
+    if (deployEscrow) {
+        console.log("--- Deploying PalindromePay ---");
+        const escrowArgs = [feeReceiver];
 
-    const escrow = await deployContract(
-        publicClient,
-        walletClient,
-        deployerAccount,
-        network.chain,
-        {
-            abi: PalindromePayArtifact.abi,
-            bytecode: PalindromePayArtifact.bytecode as Hex,
-            args: escrowArgs,
-        }
-    );
-    escrowAddress = escrow.address;
-    startBlock = escrow.blockNumber;
-    console.log(`  ${colors.green}✓ PalindromePay: ${escrowAddress}${colors.reset}\n`);
-
-    // Verify PalindromePay
-    if (!shouldSkipVerify) {
-        await verifyContract(
-            network,
-            escrowAddress,
-            "PalindromePay",
-            escrowArgs,
-            "contracts/PalindromePay.sol:PalindromePay"
+        const escrow = await deployContract(
+            publicClient,
+            walletClient,
+            deployerAccount,
+            network.chain,
+            {
+                abi: PalindromePayArtifact.abi,
+                bytecode: PalindromePayArtifact.bytecode as Hex,
+                args: escrowArgs,
+            }
         );
-        console.log();
+        escrowAddress = escrow.address;
+        startBlock = escrow.blockNumber;
+        console.log(`  ${colors.green}✓ PalindromePay: ${escrowAddress}${colors.reset}\n`);
+
+        // Verify PalindromePay
+        if (!shouldSkipVerify) {
+            await verifyContract(
+                network,
+                escrowAddress,
+                "PalindromePay",
+                escrowArgs,
+                "contracts/PalindromePay.sol:PalindromePay"
+            );
+            console.log();
+        }
     }
 
     // Summary
@@ -423,21 +461,26 @@ async function main() {
     if (usdtAddress) {
         console.log(`  Test USDT:      ${usdtAddress}`);
     }
-    console.log(`  PalindromePay:  ${escrowAddress}`);
-    console.log(`  Start Block:    ${startBlock}`);
+    if (escrowAddress) {
+        console.log(`  PalindromePay:  ${escrowAddress}`);
+        console.log(`  Start Block:    ${startBlock}`);
+    }
     console.log(`  Network:        ${networkName}`);
     console.log(`  Chain ID:       ${network.chain.id}`);
-    if (network.explorerUrl) {
+    if (network.explorerUrl && (escrowAddress || usdtAddress)) {
         console.log("----------------------------------------");
-        console.log(`  Explorer: ${network.explorerUrl}/address/${escrowAddress}`);
+        const displayAddress = escrowAddress || usdtAddress;
+        console.log(`  Explorer: ${network.explorerUrl}/address/${displayAddress}`);
     }
     console.log("========================================\n");
 
     // Output for easy copy-paste
     console.log("Environment variables for SDK:");
     console.log("----------------------------------------");
-    console.log(`CONTRACT_ADDRESS=${escrowAddress}`);
-    console.log(`START_BLOCK=${startBlock}`);
+    if (escrowAddress) {
+        console.log(`CONTRACT_ADDRESS=${escrowAddress}`);
+        console.log(`START_BLOCK=${startBlock}`);
+    }
     if (usdtAddress) {
         console.log(`USDT_ADDRESS=${usdtAddress}`);
     }
