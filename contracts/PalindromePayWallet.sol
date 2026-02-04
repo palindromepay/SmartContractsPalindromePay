@@ -74,7 +74,7 @@ contract PalindromePayWallet is ReentrancyGuard {
 
     /// @dev The message participants sign to authorize wallet operations
     bytes32 private constant WALLET_AUTHORIZATION_TYPEHASH = keccak256(
-        "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
+        "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
     );
 
     // ---------------------------------------------------------------------
@@ -137,6 +137,15 @@ contract PalindromePayWallet is ReentrancyGuard {
     /// @notice Thrown when signature 'v' value is not 27 or 28
     error SignatureVInvalid();
 
+    /// @notice Thrown when wallet address doesn't match deal.wallet
+    error WalletMismatch();
+
+    /// @notice Thrown when escrow contract address is zero
+    error EscrowContractZero();
+
+    /// @notice Thrown when amount is too small to cover the fee
+    error AmountTooSmallForFee();
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -165,7 +174,7 @@ contract PalindromePayWallet is ReentrancyGuard {
      * @param _escrowId The escrow ID this wallet belongs to
      */
     constructor(address _escrowContract, uint256 _escrowId) {
-        require(_escrowContract != address(0), "Escrow zero");
+        if (_escrowContract == address(0)) revert EscrowContractZero();
         ESCROW_CONTRACT = _escrowContract;
         ESCROW_ID = _escrowId;
 
@@ -214,6 +223,7 @@ contract PalindromePayWallet is ReentrancyGuard {
                 WALLET_AUTHORIZATION_TYPEHASH,
                 ESCROW_ID,
                 address(this),
+                ESCROW_CONTRACT,
                 participant
             )
         );
@@ -303,7 +313,7 @@ contract PalindromePayWallet is ReentrancyGuard {
 
         // Use higher of calculated fee or minimum fee
         feeAmount = calculatedFee >= minFee ? calculatedFee : minFee;
-        require(feeAmount < amount, "Amount too small for fee");
+        if (feeAmount >= amount) revert AmountTooSmallForFee();
         netAmount = amount - feeAmount;
     }
 
@@ -327,6 +337,9 @@ contract PalindromePayWallet is ReentrancyGuard {
         IPalindromePay escrow = IPalindromePay(ESCROW_CONTRACT);
         IPalindromePay.EscrowDeal memory deal = escrow.getEscrow(ESCROW_ID);
 
+        // Validate this wallet is the correct one for this escrow
+        if (deal.wallet != address(this)) revert WalletMismatch();
+
         // Validate escrow is in final state
         IPalindromePay.State state = deal.state;
         if (
@@ -340,11 +353,10 @@ contract PalindromePayWallet is ReentrancyGuard {
         // Validate token address
         if (deal.token == address(0)) revert TokenAddressZero();
 
-        // Only participants can trigger withdrawal
+        // Only buyer or seller can trigger withdrawal (not arbiter)
         if (
             msg.sender != deal.buyer &&
-            msg.sender != deal.seller &&
-            msg.sender != deal.arbiter
+            msg.sender != deal.seller
         ) {
             revert OnlyParticipant();
         }

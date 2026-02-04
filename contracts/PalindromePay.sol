@@ -353,6 +353,24 @@ contract PalindromePay is ReentrancyGuard {
         uint256 fee
     );
 
+    /// @notice Emitted when a coordinator signature is consumed
+    /// @param sigHash The canonical signature hash
+    /// @param escrowId The escrow ID
+    event SignatureUsed(
+        bytes32 indexed sigHash,
+        uint256 indexed escrowId
+    );
+
+    /// @notice Emitted when a nonce is consumed
+    /// @param escrowId The escrow ID
+    /// @param signer The signer's address
+    /// @param nonce The nonce that was used
+    event NonceUsed(
+        uint256 indexed escrowId,
+        address indexed signer,
+        uint256 nonce
+    );
+
     // ---------------------------------------------------------------------
     // Modifiers (with internal functions to reduce bytecode)
     // ---------------------------------------------------------------------
@@ -513,6 +531,8 @@ contract PalindromePay is ReentrancyGuard {
         if (bitmap & mask != 0) revert InvalidNonce();
 
         nonceBitmap[escrowId][signer][bucket] = bitmap | mask;
+
+        emit NonceUsed(escrowId, signer, nonce);
     }
 
     /// @dev Validates and marks a coordinator signature as used
@@ -545,6 +565,8 @@ contract PalindromePay is ReentrancyGuard {
         );
         if (usedSignatures[canonicalSigHash]) revert SignatureAlreadyUsed();
         usedSignatures[canonicalSigHash] = true;
+
+        emit SignatureUsed(canonicalSigHash, escrowId);
     }
 
     /// @dev Validates signature format without consuming it
@@ -600,7 +622,7 @@ contract PalindromePay is ReentrancyGuard {
 
         // Compute digest (same as PalindromePayWallet._computeDigest)
         bytes32 walletAuthorizationTypehash = keccak256(
-            "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
+            "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
         );
 
         bytes32 walletDomainSeparator = keccak256(
@@ -614,7 +636,7 @@ contract PalindromePay is ReentrancyGuard {
         );
 
         bytes32 structHash = keccak256(
-            abi.encode(walletAuthorizationTypehash, escrowId, walletAddr, expectedSigner)
+            abi.encode(walletAuthorizationTypehash, escrowId, walletAddr, address(this), expectedSigner)
         );
 
         bytes32 digest = keccak256(
@@ -1349,6 +1371,46 @@ contract PalindromePay is ReentrancyGuard {
         (, uint256 fee) = _proposePayout(escrowId, target, applyFee);
 
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
+    }
+
+    /**
+     * @notice Refunds buyer after dispute timeout if arbiter hasn't decided
+     * @dev Allows buyer to claim refund when:
+     *      - Escrow is in DISPUTED state
+     *      - DISPUTE_LONG_TIMEOUT + TIMEOUT_BUFFER has passed
+     *      - Arbiter hasn't submitted a decision
+     * @param escrowId The escrow ID
+     * @param buyerWalletSig Buyer's EIP-712 signature for wallet authorization
+     */
+    function refundAfterDisputeTimeout(
+        uint256 escrowId,
+        bytes calldata buyerWalletSig
+    )
+        external
+        nonReentrant
+        escrowExists(escrowId)
+        onlyBuyer(escrowId)
+    {
+        EscrowDeal storage deal = escrows[escrowId];
+
+        require(deal.state == State.DISPUTED, "Not disputed");
+        require(
+            block.timestamp > deal.disputeStartTime + DISPUTE_LONG_TIMEOUT + TIMEOUT_BUFFER,
+            "Timeout not reached"
+        );
+        require(!arbiterDecisionSubmitted[escrowId], "Decision already submitted");
+
+        // Verify buyer wallet signature
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+            revert InvalidWalletSignature();
+        }
+        deal.buyerWalletSig = buyerWalletSig;
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+
+        _setState(escrowId, State.REFUNDED);
+        _proposePayout(escrowId, deal.buyer, false);
+
+        emit Canceled(escrowId, msg.sender, deal.amount);
     }
 
     // ---------------------------------------------------------------------

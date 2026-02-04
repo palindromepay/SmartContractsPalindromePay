@@ -253,11 +253,13 @@ async function signStartDispute(
 /**
  * NEW: WalletAuthorization type - participant signs their OWN address
  * This authorizes the wallet to release funds according to escrow state
+ * Includes escrowContract for replay protection across deployments
  */
 const walletAuthorizationTypes = {
     WalletAuthorization: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'wallet', type: 'address' },
+        { name: 'escrowContract', type: 'address' },
         { name: 'participant', type: 'address' },
     ],
 } as const;
@@ -275,6 +277,7 @@ async function signWalletAuthorization(
     const message = {
         escrowId: BigInt(escrowId),
         wallet: walletAddress,
+        escrowContract: escrowAddress, // Include escrow contract for replay protection
         participant: signerAddress, // Participant signs their OWN address
     } as const;
 

@@ -123,6 +123,7 @@ const walletAuthorizationTypes = {
     WalletAuthorization: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'wallet', type: 'address' },
+        { name: 'escrowContract', type: 'address' },
         { name: 'participant', type: 'address' },
     ],
 } as const;
@@ -141,6 +142,7 @@ async function signWalletAuthorization(
         message: {
             escrowId: BigInt(escrowId),
             wallet: walletAddress,
+            escrowContract: escrowAddress,
             participant: signerAddress,
         },
     });
