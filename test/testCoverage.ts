@@ -46,11 +46,15 @@ const CHAIN: Chain = foundry;
 const buyer = privateKeyToAccount(buyerKey);
 const seller = privateKeyToAccount(sellerKey);
 const owner = privateKeyToAccount(ownerKey);
+// Dedicated arbiter key (Foundry Account 3) - separate from fee receiver
+const arbiterKey = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6' as `0x${string}`;
+const arbiter = privateKeyToAccount(arbiterKey);
 
 const publicClient = createPublicClient({ chain: CHAIN, transport: http(rpcUrl) });
 const buyerClient = createWalletClient({ account: buyer, chain: CHAIN, transport: http(rpcUrl) });
 const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transport: http(rpcUrl) });
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
+const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
 const tokenAbi = USDTArtifact.abi;
 const tokenBytecode = USDTArtifact.bytecode as `0x${string}`;
@@ -257,7 +261,7 @@ test('DIRECT: confirmDelivery (non-signed version)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Direct Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Direct Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -296,7 +300,7 @@ test('DIRECT: startDispute (non-signed version)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Dispute Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Dispute Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -334,7 +338,7 @@ test('DIRECT: Seller starts dispute', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Seller Dispute', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Seller Dispute', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -376,7 +380,7 @@ test('VIEW: getWalletAuthorizationDigest', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'View Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'View Test', 'QmTest', sellerSig],
     });
 
     // Test the view function
@@ -404,7 +408,7 @@ test('VIEW: Wallet getBalance', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Balance Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Balance Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -452,7 +456,7 @@ test('VIEW: Wallet isSignatureValid', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Sig Valid Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Sig Valid Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -492,7 +496,7 @@ test('VIEW: Wallet getAuthorizationDigest', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Auth Digest Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Auth Digest Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -527,7 +531,7 @@ test('EDGE: Maximum length title (100 chars)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, maxTitle, 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, maxTitle, 'QmTest', sellerSig],
     });
 
     console.log('   ✅ 100-char title accepted\n');
@@ -548,7 +552,7 @@ test('EDGE: Over-length title (101 chars) rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, overTitle, 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, overTitle, 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -571,7 +575,7 @@ test('EDGE: Empty title rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, '', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, '', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -594,7 +598,7 @@ test('EDGE: Maximum length IPFS hash (100 chars)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Hash Test', maxHash, sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Hash Test', maxHash, sellerSig],
     });
 
     console.log('   ✅ 100-char IPFS hash accepted\n');
@@ -615,7 +619,7 @@ test('EDGE: Over-length IPFS hash (101 chars) rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Hash Test', overHash, sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Hash Test', overHash, sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -688,7 +692,7 @@ test('EDGE: acceptEscrow - cannot accept twice', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrowAndDeposit',
-        args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 'Accept Test', 'QmTest', buyerSig],
+        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Accept Test', 'QmTest', buyerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -729,7 +733,7 @@ test('EDGE: acceptEscrow - wrong caller rejected', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrowAndDeposit',
-        args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 'Accept Caller Test', 'QmTest', buyerSig],
+        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Accept Caller Test', 'QmTest', buyerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -765,7 +769,7 @@ test('EDGE: Arbiter can decide after 30-day timeout with partial evidence', asyn
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Timeout Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Timeout Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -794,10 +798,10 @@ test('EDGE: Arbiter can decide after 30-day timeout with partial evidence', asyn
     });
 
     // Try to decide immediately - should fail (no full evidence, no timeout)
-    const arbiterSig = await signWalletAuthorization(ownerClient, owner.address, deal.wallet, escrowId);
+    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId);
 
     try {
-        await ownerClient.writeContract({
+        await arbiterClient.writeContract({
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'submitArbiterDecision',
@@ -815,7 +819,7 @@ test('EDGE: Arbiter can decide after 30-day timeout with partial evidence', asyn
     await increaseTime(DISPUTE_LONG_TIMEOUT + TIMEOUT_BUFFER + 100);
 
     // Now arbiter can decide
-    await ownerClient.writeContract({
+    await arbiterClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'submitArbiterDecision',

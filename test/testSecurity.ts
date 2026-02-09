@@ -47,6 +47,8 @@ const sellerKey = process.env.SELLER_KEY as `0x${string}`;
 const ownerKey = process.env.OWNER_KEY as `0x${string}`;
 // Additional attacker key for security tests
 const attackerKey = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a' as `0x${string}`;
+// Dedicated arbiter key (Foundry Account 3) - separate from fee receiver
+const arbiterKey = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6' as `0x${string}`;
 
 const CHAIN: Chain = foundry;
 
@@ -54,12 +56,14 @@ const buyer = privateKeyToAccount(buyerKey);
 const seller = privateKeyToAccount(sellerKey);
 const owner = privateKeyToAccount(ownerKey);
 const attacker = privateKeyToAccount(attackerKey);
+const arbiter = privateKeyToAccount(arbiterKey);
 
 const publicClient = createPublicClient({ chain: CHAIN, transport: http(rpcUrl) });
 const buyerClient = createWalletClient({ account: buyer, chain: CHAIN, transport: http(rpcUrl) });
 const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transport: http(rpcUrl) });
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
 const attackerClient = createWalletClient({ account: attacker, chain: CHAIN, transport: http(rpcUrl) });
+const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
 // ────────────────────────────────────────────────────────────────────────────
 // ARTIFACTS / CONSTANTS
@@ -330,7 +334,7 @@ async function createAndDepositEscrow(): Promise<{ escrowId: number; deal: any }
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Security Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Security Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -584,7 +588,7 @@ test('SECURITY: Access Control - Only buyer can deposit', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Access Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Access Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -738,7 +742,7 @@ test('SECURITY: State Manipulation - Cannot confirm in wrong state', async () =>
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'State Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'State Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -774,7 +778,7 @@ test('SECURITY: State Manipulation - Cannot dispute in wrong state', async () =>
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'State Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'State Test', 'QmTest', sellerSig],
     });
 
     // Try to start dispute before deposit
@@ -950,10 +954,10 @@ test('SECURITY: DoS - Arbiter cannot submit multiple decisions', async () => {
         args: [BigInt(escrowId), Role.Seller, 'QmEvidence'],
     });
 
-    const arbiterSig = await signWalletAuthorization(ownerClient, owner.address, deal.wallet, escrowId);
+    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId);
 
     // First decision succeeds
-    await ownerClient.writeContract({
+    await arbiterClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'submitArbiterDecision',
@@ -962,7 +966,7 @@ test('SECURITY: DoS - Arbiter cannot submit multiple decisions', async () => {
 
     // Second decision should fail
     try {
-        await ownerClient.writeContract({
+        await arbiterClient.writeContract({
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'submitArbiterDecision',
@@ -1003,7 +1007,7 @@ test('SECURITY: Integer Overflow - Solidity 0.8+ automatic checks', async () => 
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, maxAmount, 1n, owner.address, 'Overflow Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, maxAmount, 1n, arbiter.address, 'Overflow Test', 'QmTest', sellerSig],
         });
         // May fail for various reasons (amount too large, token checks, etc.)
     } catch (error: any) {
@@ -1242,7 +1246,7 @@ test('SECURITY: Validation - Amount minimum check', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, 1n, 1n, owner.address, 'Min Amount Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, 1n, 1n, arbiter.address, 'Min Amount Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - amount too small');
     } catch (error: any) {
@@ -1266,7 +1270,7 @@ test('SECURITY: Validation - Maturity time limit', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 3651n, owner.address, 'Maturity Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 3651n, arbiter.address, 'Maturity Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - maturity too long');
     } catch (error: any) {
@@ -1290,7 +1294,7 @@ test('SECURITY: Validation - Buyer cannot be seller', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 'Same Party Test', 'QmTest', sellerSig],
+            args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Same Party Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - buyer equals seller');
     } catch (error: any) {

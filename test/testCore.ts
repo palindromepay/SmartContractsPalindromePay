@@ -46,12 +46,15 @@ const CHAIN: Chain = foundry;
 
 const buyer = privateKeyToAccount(buyerKey);
 const seller = privateKeyToAccount(sellerKey);
-const owner = privateKeyToAccount(ownerKey); // arbiter + feeReceiver
+const owner = privateKeyToAccount(ownerKey); // feeReceiver
+const arbiterKey = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6' as `0x${string}`;
+const arbiter = privateKeyToAccount(arbiterKey);
 
 const publicClient = createPublicClient({ chain: CHAIN, transport: http(rpcUrl) });
 const buyerClient = createWalletClient({ account: buyer, chain: CHAIN, transport: http(rpcUrl) });
 const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transport: http(rpcUrl) });
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
+const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
 // ────────────────────────────────────────────────────────────────────────────
 // ARTIFACTS / CONSTANTS
@@ -134,7 +137,7 @@ before(async () => {
     console.log(`   Chain ID:   ${chainId}`);
     console.log(`   Buyer:      ${buyer.address}`);
     console.log(`   Seller:     ${seller.address}`);
-    console.log(`   Arbiter:    ${owner.address}`);
+    console.log(`   Arbiter:    ${arbiter.address}`);
     console.log('═══════════════════════════════════════════════════════════════\n');
 });
 
@@ -521,7 +524,7 @@ test('Scenario 1: Happy Path - Seller creates, buyer confirms (gasless), seller 
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            owner.address, // arbiter
+            arbiter.address, // arbiter
             'Happy Path Escrow',
             'QmHappyPath',
             sellerWalletSig,
@@ -650,7 +653,7 @@ test('Scenario 2: Timeout Refund - Buyer gets full refund after timeout', async 
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            owner.address,
+            arbiter.address,
             'Timeout Escrow',
             'QmTimeout',
             sellerSig,
@@ -750,7 +753,7 @@ test('Scenario 3: Mutual Cancel - Both parties agree, buyer gets full refund', a
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Mutual Cancel Escrow',
             'QmMutualCancel',
             sellerSig,
@@ -852,7 +855,7 @@ test('Scenario 4A: Dispute - Arbiter rules for buyer (REFUNDED) using startDispu
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Dispute Escrow - Buyer Wins',
             'QmDisputeBuyerWins',
             sellerWalletSig,
@@ -927,13 +930,13 @@ test('Scenario 4A: Dispute - Arbiter rules for buyer (REFUNDED) using startDispu
 
     // Arbiter decides for buyer (REFUNDED)
     const arbiterWalletSig = await signWalletAuthorization(
-        ownerClient,
-        owner.address,
+        arbiterClient,
+        arbiter.address,
         deal0.wallet,
         escrowId,
     );
 
-    await ownerClient.writeContract({
+    await arbiterClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'submitArbiterDecision',
@@ -996,7 +999,7 @@ test('Scenario 4B: Dispute - Arbiter rules for seller (COMPLETE)', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Dispute Escrow - Seller Wins',
             'QmDisputeSellerWins',
             sellerSig,
@@ -1045,13 +1048,13 @@ test('Scenario 4B: Dispute - Arbiter rules for seller (COMPLETE)', async () => {
 
     // Arbiter decides for seller (COMPLETE)
     const arbiterSig = await signWalletAuthorization(
-        ownerClient,
-        owner.address,
+        arbiterClient,
+        arbiter.address,
         deal0.wallet,
         escrowId,
     );
 
-    await ownerClient.writeContract({
+    await arbiterClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'submitArbiterDecision',
@@ -1121,7 +1124,7 @@ test('Scenario 5: Buyer creates escrow and deposits in one transaction', async (
             seller.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Buyer Created Escrow',
             'QmBuyerCreated',
             buyerWalletSig,
@@ -1220,7 +1223,7 @@ test('Security: Cannot withdraw before final state', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Security Test', 'QmSec', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Security Test', 'QmSec', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1263,7 +1266,7 @@ test('Security: Cannot withdraw with insufficient signatures', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Sig Test', 'QmSigTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Sig Test', 'QmSigTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1302,7 +1305,7 @@ test('Security: Cannot double withdraw', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Double Withdraw Test', 'QmDouble', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Double Withdraw Test', 'QmDouble', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1355,7 +1358,7 @@ test('Security: Only participants can withdraw', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Participant Test', 'QmPart', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Participant Test', 'QmPart', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1421,7 +1424,7 @@ test('Scenario 6A: Auto-Release - Seller claims after grace period (buyer unresp
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            owner.address,
+            arbiter.address,
             'Auto-Release Escrow',
             'QmAutoRelease',
             sellerWalletSig,
@@ -1533,7 +1536,7 @@ test('Scenario 6B: Auto-Release blocked by buyer cancel request', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Auto-Release Cancel Block',
             'QmCancelBlock',
             sellerWalletSig,
@@ -1640,7 +1643,7 @@ test('Scenario 6C: Auto-Release blocked by active dispute', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Auto-Release Dispute Block',
             'QmDisputeBlock',
             sellerWalletSig,
@@ -1726,7 +1729,7 @@ test('Security: Only seller can call autoRelease', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Only Seller Test',
             'QmOnlySeller',
             sellerWalletSig,
@@ -1774,7 +1777,7 @@ test('Security: Only seller can call autoRelease', async () => {
 
     // Arbiter tries to call autoRelease - should fail
     try {
-        await ownerClient.writeContract({
+        await arbiterClient.writeContract({
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'autoRelease',
@@ -1927,7 +1930,7 @@ test('Scenario 7B: cancelByTimeout fails without requesting cancel first', async
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'No Request Escrow',
             'QmNoRequest',
             sellerSig,
@@ -2009,7 +2012,7 @@ test('Scenario 8: Direct confirmDelivery (non-gasless)', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Direct Confirm Escrow',
             'QmDirectConfirm',
             sellerWalletSig,
@@ -2089,7 +2092,7 @@ test('Security: Signature/nonce replay protection', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Replay Test',
             'QmReplay',
             sellerWalletSig,
@@ -2163,7 +2166,7 @@ test('Security: Signature/nonce replay protection', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            owner.address,
+            arbiter.address,
             'Replay Test 2',
             'QmReplay2',
             sellerSig2,
@@ -2247,7 +2250,7 @@ test('Scenario 10: Minimum 1 day maturity requirement', async () => {
                 buyer.address,
                 AMOUNT,
                 0n, // 0 maturity days - should fail
-                owner.address,
+                arbiter.address,
                 'Zero Maturity Escrow',
                 'QmZeroMaturity',
                 sellerWalletSig,
@@ -2273,7 +2276,7 @@ test('Scenario 10: Minimum 1 day maturity requirement', async () => {
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            owner.address,
+            arbiter.address,
             'One Day Maturity Escrow',
             'QmOneDayMaturity',
             sellerWalletSig,
