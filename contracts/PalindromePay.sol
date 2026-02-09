@@ -6,11 +6,12 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {PalindromePayWallet} from "./PalindromePayWallet.sol";
+interface IWalletFactory {
+    function deploy(uint256 escrowId) external returns (address);
+    function predictWalletAddress(address escrowContract, uint256 escrowId) external view returns (address);
+}
 
 /**
- * @title PalindromePay
- * @author Palindrome Pay
  * @notice Trustless escrow for ERC20 token transactions with dispute resolution
  * @dev Creates individual wallet contracts for each escrow using CREATE2.
  *      Supports buyer/seller cancellation, arbiter-based dispute resolution,
@@ -92,6 +93,9 @@ contract PalindromePay is ReentrancyGuard {
 
     /// @notice Address receiving platform fees
     address public immutable FEE_RECEIVER;
+
+    /// @notice Factory contract for deploying escrow wallets
+    IWalletFactory public immutable WALLET_FACTORY;
 
     /// @dev Cached EIP-712 domain separator at deployment
     bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
@@ -462,9 +466,12 @@ contract PalindromePay is ReentrancyGuard {
 
     /// @notice Initializes the escrow contract
     /// @param _feeReceiver Address to receive platform fees
-    constructor(address _feeReceiver) {
+    /// @param _walletFactory Factory contract for deploying escrow wallets
+    constructor(address _feeReceiver, address _walletFactory) {
         require(_feeReceiver != address(0), "FeeTo zero");
+        require(_walletFactory != address(0), "Factory zero");
         FEE_RECEIVER = _feeReceiver;
+        WALLET_FACTORY = IWalletFactory(_walletFactory);
 
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = _computeDomainSeparator();
@@ -792,48 +799,24 @@ contract PalindromePay is ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
-    // Internal CREATE2 deploy
+    // Wallet deploy (via factory)
     // ---------------------------------------------------------------------
 
     /// @dev Predicts wallet address for a given escrow ID (before deployment)
     /// @param escrowId The escrow ID used as salt
     /// @return predicted The predicted wallet contract address
     function _predictWalletAddress(uint256 escrowId) internal view returns (address predicted) {
-        bytes32 salt = keccak256(abi.encodePacked(escrowId));
-        bytes32 bytecodeHash = keccak256(
-            abi.encodePacked(
-                type(PalindromePayWallet).creationCode,
-                abi.encode(address(this), escrowId)
-            )
-        );
-        predicted = address(uint160(uint256(keccak256(
-            abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)
-        ))));
+        return WALLET_FACTORY.predictWalletAddress(address(this), escrowId);
     }
 
-    /// @dev Deploys a new escrow wallet using CREATE2 for deterministic addresses
+    /// @dev Deploys a new escrow wallet via the factory
     /// @param escrowId The escrow ID used as salt
     /// @return walletAddr The deployed wallet contract address
     function _deployWalletWithCreate2(uint256 escrowId)
         internal
         returns (address walletAddr)
     {
-        bytes32 salt = keccak256(abi.encodePacked(escrowId));
-
-        bytes memory bytecode = abi.encodePacked(
-            type(PalindromePayWallet).creationCode,
-            abi.encode(address(this), escrowId)
-        );
-
-        assembly ("memory-safe") {
-            let codePtr := add(bytecode, 0x20)
-            let codeSize := mload(bytecode)
-
-            walletAddr := create2(0, codePtr, codeSize, salt)
-            if iszero(walletAddr) {
-                revert(0, 0)
-            }
-        }
+        return WALLET_FACTORY.deploy(escrowId);
     }
 
     // ---------------------------------------------------------------------
@@ -875,6 +858,8 @@ contract PalindromePay is ReentrancyGuard {
         require(amount >= minimumAmount, "Amount too small");
 
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
+        require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
+        require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
 
         uint256 escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -952,6 +937,8 @@ contract PalindromePay is ReentrancyGuard {
         require(amount >= minimumAmount, "Amount too small");
 
         require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
+        require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
+        require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
 
         escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -994,10 +981,15 @@ contract PalindromePay is ReentrancyGuard {
         // Effects before interactions (CEI pattern)
         deal.depositTime = block.timestamp;
         _setState(escrowId, State.AWAITING_DELIVERY);
-        emit EscrowCreatedAndDeposited(escrowId, msg.sender, amount);
 
-        // External call last
+        // Transfer and record actual received amount (fee-on-transfer safe)
+        uint256 balBefore = IERC20(token).balanceOf(walletAddr);
         IERC20(token).safeTransferFrom(msg.sender, walletAddr, amount);
+        uint256 received = IERC20(token).balanceOf(walletAddr) - balBefore;
+        require(received >= _calculateMinimumAmount(decimals), "Amount too small after transfer");
+        deal.amount = received;
+
+        emit EscrowCreatedAndDeposited(escrowId, msg.sender, received);
     }
 
     // ---------------------------------------------------------------------
@@ -1026,14 +1018,19 @@ contract PalindromePay is ReentrancyGuard {
         // Effects before interactions (CEI pattern)
         deal.depositTime = block.timestamp;
         _setState(escrowId, State.AWAITING_DELIVERY);
-        emit PaymentDeposited(escrowId, msg.sender, deal.amount);
 
-        // External call last
+        // Transfer and record actual received amount (fee-on-transfer safe)
+        uint256 balBefore = IERC20(deal.token).balanceOf(deal.wallet);
         IERC20(deal.token).safeTransferFrom(
             msg.sender,
             deal.wallet,
             deal.amount
         );
+        uint256 received = IERC20(deal.token).balanceOf(deal.wallet) - balBefore;
+        require(received >= _calculateMinimumAmount(deal.tokenDecimals), "Amount too small after transfer");
+        deal.amount = received;
+
+        emit PaymentDeposited(escrowId, msg.sender, received);
     }
 
     // ---------------------------------------------------------------------
@@ -1292,7 +1289,7 @@ contract PalindromePay is ReentrancyGuard {
         external
         nonReentrant
         escrowExists(escrowId)
-        onlyParticipant(escrowId)
+        onlyBuyerOrSeller(escrowId)
     {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.DISPUTED, "Not disputed");
@@ -1474,6 +1471,10 @@ contract PalindromePay is ReentrancyGuard {
         _useSignature(escrowId, coordSignature);
         _useNonce(escrowId, deal.buyer, nonce);
 
+        // Verify buyer wallet sig cryptographically (not just format)
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, deal.buyer)) {
+            revert InvalidWalletSignature();
+        }
         deal.buyerWalletSig = buyerWalletSig;
         emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
 
@@ -1509,6 +1510,7 @@ contract PalindromePay is ReentrancyGuard {
             "Invalid deadline"
         );
         EscrowDeal storage deal = escrows[escrowId];
+        require(deal.arbiter != address(0), "Zero arbiter");
         require(deal.state == State.AWAITING_DELIVERY, "Invalid state");
         _validateSignatureFormat(signature);
 
@@ -1587,7 +1589,7 @@ contract PalindromePay is ReentrancyGuard {
         );
 
         bytes32 walletAuthorizationTypehash = keccak256(
-            "WalletAuthorization(uint256 escrowId,address wallet,address participant)"
+            "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
         );
 
         bytes32 walletDomainSeparator = keccak256(
@@ -1605,6 +1607,7 @@ contract PalindromePay is ReentrancyGuard {
                 walletAuthorizationTypehash,
                 escrowId,
                 deal.wallet,
+                address(this),
                 participant
             )
         );
@@ -1620,5 +1623,22 @@ contract PalindromePay is ReentrancyGuard {
      */
     function DOMAIN_SEPARATOR() external view returns (bytes32) {
         return _domainSeparator();
+    }
+
+    // -----------------------------------------------------------------
+    // Token Recovery
+    // -----------------------------------------------------------------
+
+    /**
+     * @notice Recovers ERC-20 tokens accidentally sent to this contract
+     * @dev Only callable by FEE_RECEIVER. Cannot recover native ETH.
+     * @param token The ERC-20 token address to recover
+     * @param to The recipient address
+     * @param amount The amount to recover
+     */
+    function recoverToken(address token, address to, uint256 amount) external {
+        require(msg.sender == FEE_RECEIVER, "Only fee receiver");
+        require(to != address(0), "Zero address");
+        IERC20(token).safeTransfer(to, amount);
     }
 }

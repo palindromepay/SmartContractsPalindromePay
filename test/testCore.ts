@@ -25,6 +25,7 @@ import { getChainId } from 'viem/actions';
 
 import EscrowArtifact from '../artifacts/contracts/PalindromePay.sol/PalindromePay.json' with { type: 'json' };
 import WalletArtifact from '../artifacts/contracts/PalindromePayWallet.sol/PalindromePayWallet.json' with { type: 'json' };
+import FactoryArtifact from '../artifacts/contracts/PalindromePayWalletFactory.sol/PalindromePayWalletFactory.json' with { type: 'json' };
 import USDTArtifact from '../artifacts/contracts/USDT.sol/USDT.json' with { type: 'json' };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -62,9 +63,12 @@ const escrowAbi = EscrowArtifact.abi;
 const escrowBytecode = EscrowArtifact.bytecode as `0x${string}`;
 const walletAbi = WalletArtifact.abi;
 const walletCreationCode = WalletArtifact.bytecode as `0x${string}`;
+const factoryAbi = FactoryArtifact.abi;
+const factoryBytecode = FactoryArtifact.bytecode as `0x${string}`;
 
 let tokenAddress: Address;
 let escrowAddress: Address;
+let factoryAddress: Address;
 
 const chainIdNumber: number = await getChainId(publicClient);
 const chainId: bigint = BigInt(chainIdNumber);
@@ -104,11 +108,20 @@ before(async () => {
     const tokenReceipt = await publicClient.waitForTransactionReceipt({ hash: tokenTxHash });
     tokenAddress = tokenReceipt.contractAddress as Address;
 
-    // Deploy escrow: constructor(address _feeReceiver)
+    // Deploy wallet factory
+    const factoryTxHash = await ownerClient.deployContract({
+        abi: factoryAbi,
+        bytecode: factoryBytecode,
+        args: [],
+    });
+    const factoryReceipt = await publicClient.waitForTransactionReceipt({ hash: factoryTxHash });
+    factoryAddress = factoryReceipt.contractAddress as Address;
+
+    // Deploy escrow: constructor(address _feeReceiver, address _walletFactory)
     const escrowTxHash = await ownerClient.deployContract({
         abi: escrowAbi,
         bytecode: escrowBytecode,
-        args: [owner.address],
+        args: [owner.address, factoryAddress],
     });
     const escrowReceipt = await publicClient.waitForTransactionReceipt({ hash: escrowTxHash });
     escrowAddress = escrowReceipt.contractAddress as Address;
@@ -116,6 +129,7 @@ before(async () => {
     console.log('\n🚀 PALINDROME CRYPTO ESCROW - SECURITY & FUNCTIONALITY TESTS');
     console.log('═══════════════════════════════════════════════════════════════');
     console.log(`   USDT:       ${tokenAddress}`);
+    console.log(`   Factory:    ${factoryAddress}`);
     console.log(`   Escrow:     ${escrowAddress}`);
     console.log(`   Chain ID:   ${chainId}`);
     console.log(`   Buyer:      ${buyer.address}`);
@@ -409,7 +423,7 @@ function computePredictedWallet(escrowId: number): Address {
     const initCodeHash = keccak256(initCode);
 
     const raw = keccak256(
-        (`0xFF${escrowAddress.slice(2)}${salt.slice(2)}${initCodeHash.slice(2)}`) as `0x${string}`,
+        (`0xFF${factoryAddress.slice(2)}${salt.slice(2)}${initCodeHash.slice(2)}`) as `0x${string}`,
     );
 
     return getAddress(`0x${raw.slice(26)}`);

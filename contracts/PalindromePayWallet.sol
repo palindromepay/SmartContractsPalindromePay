@@ -353,7 +353,7 @@ contract PalindromePayWallet is ReentrancyGuard {
         // Validate token address
         if (deal.token == address(0)) revert TokenAddressZero();
 
-        // Only buyer or seller can trigger withdrawal (not arbiter)
+        // Only buyer or seller can trigger withdrawal
         if (
             msg.sender != deal.buyer &&
             msg.sender != deal.seller

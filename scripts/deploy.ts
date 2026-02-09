@@ -481,8 +481,40 @@ async function main() {
 
     // Deploy PalindromePay if requested
     if (deployEscrow) {
+        // Deploy WalletFactory first
+        console.log("--- Deploying PalindromePayWalletFactory ---");
+        const FactoryArtifact = loadArtifact(
+            "./artifacts/contracts/PalindromePayWalletFactory.sol/PalindromePayWalletFactory.json"
+        );
+
+        const factory = await deployContract(
+            publicClient,
+            walletClient,
+            network.chain,
+            {
+                abi: FactoryArtifact.abi,
+                bytecode: FactoryArtifact.bytecode as Hex,
+                args: [],
+            }
+        );
+        const factoryAddress = factory.address;
+        console.log(`  ${colors.green}✓ WalletFactory: ${factoryAddress}${colors.reset}\n`);
+
+        // Verify WalletFactory
+        if (!shouldSkipVerify) {
+            await verifyContract(
+                network,
+                factoryAddress,
+                "PalindromePayWalletFactory",
+                [],
+                "contracts/PalindromePayWalletFactory.sol:PalindromePayWalletFactory"
+            );
+            console.log();
+        }
+
+        // Deploy PalindromePay with factory address
         console.log("--- Deploying PalindromePay ---");
-        const escrowArgs = [feeReceiver];
+        const escrowArgs = [feeReceiver, factoryAddress];
 
         const escrow = await deployContract(
             publicClient,

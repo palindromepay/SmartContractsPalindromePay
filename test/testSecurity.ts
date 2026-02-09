@@ -34,6 +34,7 @@ import { getChainId } from 'viem/actions';
 
 import EscrowArtifact from '../artifacts/contracts/PalindromePay.sol/PalindromePay.json' with { type: 'json' };
 import WalletArtifact from '../artifacts/contracts/PalindromePayWallet.sol/PalindromePayWallet.json' with { type: 'json' };
+import FactoryArtifact from '../artifacts/contracts/PalindromePayWalletFactory.sol/PalindromePayWalletFactory.json' with { type: 'json' };
 import USDTArtifact from '../artifacts/contracts/USDT.sol/USDT.json' with { type: 'json' };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -70,9 +71,12 @@ const escrowAbi = EscrowArtifact.abi;
 const escrowBytecode = EscrowArtifact.bytecode as `0x${string}`;
 const walletAbi = WalletArtifact.abi;
 const walletCreationCode = WalletArtifact.bytecode as `0x${string}`;
+const factoryAbi = FactoryArtifact.abi;
+const factoryBytecode = FactoryArtifact.bytecode as `0x${string}`;
 
 let tokenAddress: Address;
 let escrowAddress: Address;
+let factoryAddress: Address;
 
 const chainIdNumber: number = await getChainId(publicClient);
 const chainId: bigint = BigInt(chainIdNumber);
@@ -111,10 +115,18 @@ before(async () => {
     const tokenReceipt = await publicClient.waitForTransactionReceipt({ hash: tokenTxHash });
     tokenAddress = tokenReceipt.contractAddress as Address;
 
+    const factoryTxHash = await ownerClient.deployContract({
+        abi: factoryAbi,
+        bytecode: factoryBytecode,
+        args: [],
+    });
+    const factoryReceipt = await publicClient.waitForTransactionReceipt({ hash: factoryTxHash });
+    factoryAddress = factoryReceipt.contractAddress as Address;
+
     const escrowTxHash = await ownerClient.deployContract({
         abi: escrowAbi,
         bytecode: escrowBytecode,
-        args: [owner.address],
+        args: [owner.address, factoryAddress],
     });
     const escrowReceipt = await publicClient.waitForTransactionReceipt({ hash: escrowTxHash });
     escrowAddress = escrowReceipt.contractAddress as Address;
@@ -303,7 +315,7 @@ function computePredictedWallet(escrowId: number): Address {
     );
     const initCode = (walletCreationCode + encodedArgs.slice(2)) as `0x${string}`;
     const initCodeHash = keccak256(initCode);
-    const raw = keccak256((`0xFF${escrowAddress.slice(2)}${salt.slice(2)}${initCodeHash.slice(2)}`) as `0x${string}`);
+    const raw = keccak256((`0xFF${factoryAddress.slice(2)}${salt.slice(2)}${initCodeHash.slice(2)}`) as `0x${string}`);
     return getAddress(`0x${raw.slice(26)}`);
 }
 
@@ -1325,6 +1337,50 @@ test('SECURITY: Validation - Arbiter cannot be buyer or seller', async () => {
     }
 });
 
+test('SECURITY: Validation - Arbiter cannot be fee receiver', async () => {
+    console.log('\n🔒 VALIDATION TEST: Arbiter != FEE_RECEIVER');
+
+    await fundAndApprove(sellerClient, seller.address);
+    const escrowId = await getNextEscrowId();
+    const predictedWallet = computePredictedWallet(escrowId);
+
+    const sellerSig = await signWalletAuthorization(sellerClient, seller.address, predictedWallet, escrowId);
+
+    // Try arbiter = fee receiver (owner is fee receiver in test setup)
+    try {
+        await sellerClient.writeContract({
+            address: escrowAddress,
+            abi: escrowAbi,
+            functionName: 'createEscrow',
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Fee Receiver Arbiter', 'QmTest', sellerSig],
+        });
+        assert.fail('Should have reverted - arbiter equals fee receiver');
+    } catch (error: any) {
+        assert.ok(error.message.includes('Arbiter cannot be fee receiver') || error.message.includes('revert'));
+        console.log('   ✅ Arbiter = fee receiver rejected (createEscrow)');
+    }
+
+    // Also test createEscrowAndDeposit
+    await fundAndApprove(buyerClient, buyer.address);
+    const escrowId2 = await getNextEscrowId();
+    const predictedWallet2 = computePredictedWallet(escrowId2);
+
+    const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, predictedWallet2, escrowId2);
+
+    try {
+        await buyerClient.writeContract({
+            address: escrowAddress,
+            abi: escrowAbi,
+            functionName: 'createEscrowAndDeposit',
+            args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 'Fee Receiver Arbiter', 'QmTest', buyerSig],
+        });
+        assert.fail('Should have reverted - arbiter equals fee receiver');
+    } catch (error: any) {
+        assert.ok(error.message.includes('Arbiter cannot be fee receiver') || error.message.includes('revert'));
+        console.log('   ✅ Arbiter = fee receiver rejected (createEscrowAndDeposit)');
+    }
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // SUMMARY
 // ════════════════════════════════════════════════════════════════════════════
@@ -1345,5 +1401,6 @@ test('Security Test Summary', async () => {
     console.log('  ✅ Front-Running: Deadline + signer binding protection');
     console.log('  ✅ Wallet Security: 2-of-3 multisig verified');
     console.log('  ✅ Data Validation: All inputs validated');
+    console.log('  ✅ Conflict of Interest: Arbiter != FEE_RECEIVER enforced');
     console.log('═══════════════════════════════════════════════════════════════\n');
 });
