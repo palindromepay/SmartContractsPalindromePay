@@ -18,6 +18,11 @@ const config: HardhatUserConfig = {
       },
     ],
   },
+  verify: {
+    etherscan: {
+      apiKey: process.env.ETHERSCAN_API_KEY || "",
+    },
+  },
   networks: {
     hardhatMainnet: { type: "edr-simulated", chainType: "l1" },
     hardhatOp: { type: "edr-simulated", chainType: "op" },

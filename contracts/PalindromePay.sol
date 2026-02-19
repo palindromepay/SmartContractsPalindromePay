@@ -159,8 +159,6 @@ contract PalindromePay is ReentrancyGuard {
     /// @notice Thrown when caller is neither buyer nor seller
     error OnlyBuyerOrSeller();
 
-    /// @notice Thrown when caller is not a participant (buyer, seller, or arbiter)
-    error NotParticipant();
 
     // ---------------------------------------------------------------------
     // Events
@@ -389,23 +387,6 @@ contract PalindromePay is ReentrancyGuard {
     /// @param escrowId The escrow ID to check
     modifier escrowExists(uint256 escrowId) {
         _escrowExists(escrowId);
-        _;
-    }
-
-    /// @dev Internal function for onlyParticipant modifier
-    function _onlyParticipant(uint256 escrowId) internal view {
-        EscrowDeal storage deal = escrows[escrowId];
-        if (
-            msg.sender != deal.buyer &&
-            msg.sender != deal.seller &&
-            msg.sender != deal.arbiter
-        ) revert NotParticipant();
-    }
-
-    /// @notice Restricts access to escrow participants only
-    /// @param escrowId The escrow ID
-    modifier onlyParticipant(uint256 escrowId) {
-        _onlyParticipant(escrowId);
         _;
     }
 

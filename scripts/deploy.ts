@@ -23,6 +23,9 @@
  *   # Deploy with Trezor hardware wallet (via Frame)
  *   npx ts-node scripts/deploy.ts eth --trezor
  *
+ *   # Verify already-deployed contracts (no deployment)
+ *   npx ts-node scripts/deploy.ts base --verify-only --factory 0x123... --escrow 0x456...
+ *
  *   # Combine options
  *   npx ts-node scripts/deploy.ts bsc-test --escrow-only --no-verify
  *
@@ -197,6 +200,9 @@ Options:
   --no-verify    - Skip contract verification
   --with-usdt    - Deploy test USDT token (default for testnets/local)
   --trezor       - Use Trezor via Frame wallet (requires Frame running)
+  --verify-only  - Only verify contracts (skip deployment)
+  --factory <addr> - Factory address (for --verify-only)
+  --escrow <addr>  - Escrow address (for --verify-only)
 
 Examples:
   npx ts-node scripts/deploy.ts local                             # Local: USDT + Escrow
@@ -322,6 +328,7 @@ async function main() {
     const skipVerify = args.includes("--no-verify");
     const withUsdt = args.includes("--with-usdt");
     const useTrezor = args.includes("--trezor");
+    const verifyOnly = args.includes("--verify-only");
 
     // Validate network
     const network = NETWORKS[networkName];
@@ -329,6 +336,46 @@ async function main() {
         console.error(`${colors.red}Error: Unknown network: ${networkName}${colors.reset}`);
         console.error(`Available networks: ${Object.keys(NETWORKS).join(", ")}`);
         process.exit(1);
+    }
+
+    // Handle --verify-only mode
+    if (verifyOnly) {
+        const factoryIdx = args.indexOf("--factory");
+        const escrowIdx = args.indexOf("--escrow");
+        const factoryAddr = factoryIdx !== -1 && args[factoryIdx + 1] ? args[factoryIdx + 1] as Hex : undefined;
+        const escrowAddr = escrowIdx !== -1 && args[escrowIdx + 1] ? args[escrowIdx + 1] as Hex : undefined;
+
+        if (!factoryAddr && !escrowAddr) {
+            console.error(`${colors.red}Error: --verify-only requires at least one of --factory <addr> or --escrow <addr>${colors.reset}`);
+            process.exit(1);
+        }
+
+        const feeReceiver = validateAddress(process.env.FREE_RECEIVER, "FREE_RECEIVER");
+
+        console.log("========================================");
+        console.log("  PalindromePay Verification Only");
+        console.log("========================================");
+        console.log(`  Network:  ${networkName}`);
+        console.log(`  Chain ID: ${network.chain.id}`);
+        if (factoryAddr) console.log(`  Factory:  ${factoryAddr}`);
+        if (escrowAddr) console.log(`  Escrow:   ${escrowAddr}`);
+        console.log("========================================\n");
+
+        if (factoryAddr) {
+            await verifyContract(network, factoryAddr, "PalindromePayWalletFactory", [],
+                "contracts/PalindromePayWalletFactory.sol:PalindromePayWalletFactory");
+            console.log();
+        }
+        if (escrowAddr && factoryAddr) {
+            await verifyContract(network, escrowAddr, "PalindromePay", [feeReceiver, factoryAddr],
+                "contracts/PalindromePay.sol:PalindromePay");
+            console.log();
+        } else if (escrowAddr) {
+            console.error(`${colors.yellow}Warning: --escrow requires --factory to construct constructor args${colors.reset}`);
+        }
+
+        console.log(`${colors.green}Verification complete!${colors.reset}`);
+        return;
     }
 
     // Validate mutually exclusive options
@@ -378,7 +425,7 @@ async function main() {
         console.log(`Make sure Frame is running with Trezor connected.\n`);
 
         // Create Frame transport
-        const frameTransport = http(FRAME_RPC_URL);
+        const frameTransport = http(FRAME_RPC_URL, { timeout: 600_000 });
 
         // Get accounts from Frame
         const tempClient = createWalletClient({
@@ -445,7 +492,21 @@ async function main() {
 
     let usdtAddress: Hex | undefined;
     let escrowAddress: Hex | undefined;
+    let factoryAddress: Hex | undefined;
     let startBlock: bigint | undefined;
+
+    // Collect verification tasks to run after all deployments
+    const verifyTasks: Array<{
+        address: Hex;
+        name: string;
+        args: any[];
+        path: string;
+    }> = [];
+
+    // =========================================================================
+    // Phase 1: Deploy all contracts
+    // =========================================================================
+    console.log(`${colors.green}=== Phase 1: Deploying Contracts ===${colors.reset}\n`);
 
     // Deploy USDT if requested
     if (deployUsdt) {
@@ -466,16 +527,13 @@ async function main() {
         usdtAddress = usdt.address;
         console.log(`  ${colors.green}✓ Test USDT: ${usdtAddress}${colors.reset}\n`);
 
-        // Verify USDT
         if (!shouldSkipVerify) {
-            await verifyContract(
-                network,
-                usdtAddress,
-                "USDT",
-                usdtArgs,
-                "contracts/USDT.sol:USDT"
-            );
-            console.log();
+            verifyTasks.push({
+                address: usdtAddress,
+                name: "USDT",
+                args: usdtArgs,
+                path: "contracts/USDT.sol:USDT",
+            });
         }
     }
 
@@ -497,19 +555,16 @@ async function main() {
                 args: [],
             }
         );
-        const factoryAddress = factory.address;
+        factoryAddress = factory.address;
         console.log(`  ${colors.green}✓ WalletFactory: ${factoryAddress}${colors.reset}\n`);
 
-        // Verify WalletFactory
         if (!shouldSkipVerify) {
-            await verifyContract(
-                network,
-                factoryAddress,
-                "PalindromePayWalletFactory",
-                [],
-                "contracts/PalindromePayWalletFactory.sol:PalindromePayWalletFactory"
-            );
-            console.log();
+            verifyTasks.push({
+                address: factoryAddress,
+                name: "PalindromePayWalletFactory",
+                args: [],
+                path: "contracts/PalindromePayWalletFactory.sol:PalindromePayWalletFactory",
+            });
         }
 
         // Deploy PalindromePay with factory address
@@ -530,14 +585,29 @@ async function main() {
         startBlock = escrow.blockNumber;
         console.log(`  ${colors.green}✓ PalindromePay: ${escrowAddress}${colors.reset}\n`);
 
-        // Verify PalindromePay
         if (!shouldSkipVerify) {
+            verifyTasks.push({
+                address: escrowAddress,
+                name: "PalindromePay",
+                args: escrowArgs,
+                path: "contracts/PalindromePay.sol:PalindromePay",
+            });
+        }
+    }
+
+    // =========================================================================
+    // Phase 2: Verify all contracts
+    // =========================================================================
+    if (verifyTasks.length > 0) {
+        console.log(`\n${colors.green}=== Phase 2: Verifying Contracts ===${colors.reset}\n`);
+
+        for (const task of verifyTasks) {
             await verifyContract(
                 network,
-                escrowAddress,
-                "PalindromePay",
-                escrowArgs,
-                "contracts/PalindromePay.sol:PalindromePay"
+                task.address,
+                task.name,
+                task.args,
+                task.path
             );
             console.log();
         }
