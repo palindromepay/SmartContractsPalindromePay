@@ -65,6 +65,20 @@ const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport
 const attackerClient = createWalletClient({ account: attacker, chain: CHAIN, transport: http(rpcUrl) });
 const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
+// Make every writeContract wait for its receipt before returning, so a
+// following read never races an unmined tx (deterministic tests). Reverting
+// txs still throw at send time (gas estimation), so negative try/catch tests
+// are unaffected.
+function autoWaitWrites(client: any) {
+    const orig = client.writeContract.bind(client);
+    client.writeContract = async (args: any) => {
+        const hash = await orig(args);
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+    };
+}
+[buyerClient, sellerClient, ownerClient, attackerClient, arbiterClient].forEach(autoWaitWrites);
+
 // ────────────────────────────────────────────────────────────────────────────
 // ARTIFACTS / CONSTANTS
 // ────────────────────────────────────────────────────────────────────────────
@@ -174,11 +188,12 @@ function getEscrowDomain() {
 }
 
 const walletAuthorizationTypes = {
-    WalletAuthorization: [
+    PayoutAuthorization: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'wallet', type: 'address' },
         { name: 'escrowContract', type: 'address' },
         { name: 'participant', type: 'address' },
+        { name: 'outcome', type: 'uint8' },
     ],
 } as const;
 
@@ -201,17 +216,19 @@ async function signWalletAuthorization(
     signerAddress: Address,
     walletAddress: Address,
     escrowId: number,
+    outcome: number = 3, // default COMPLETE
 ) {
     return signerClient.signTypedData({
         account: signerAddress,
         domain: getWalletDomain(walletAddress),
         types: walletAuthorizationTypes,
-        primaryType: 'WalletAuthorization',
+        primaryType: 'PayoutAuthorization',
         message: {
             escrowId: BigInt(escrowId),
             wallet: walletAddress,
             escrowContract: escrowAddress,
             participant: signerAddress,
+            outcome,
         },
     });
 }
@@ -954,7 +971,7 @@ test('SECURITY: DoS - Arbiter cannot submit multiple decisions', async () => {
         args: [BigInt(escrowId), Role.Seller, 'QmEvidence'],
     });
 
-    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId);
+    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId, State.REFUNDED);
 
     // First decision succeeds
     await arbiterClient.writeContract({
@@ -1188,12 +1205,12 @@ test('SECURITY: Wallet - Validates sufficient signatures (2-of-3)', async () => 
         args: [BigInt(escrowId), buyerSig],
     });
 
-    // Check signature count
+    // Check signature count for the COMPLETE outcome (state after confirmDelivery)
     const sigCount = await publicClient.readContract({
         address: deal.wallet,
         abi: walletAbi,
         functionName: 'getValidSignatureCount',
-        args: [],
+        args: [State.COMPLETE],
     });
 
     assert.ok(Number(sigCount) >= 2, 'Should have at least 2 valid signatures');

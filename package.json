@@ -10,7 +10,8 @@
     "deploy:local": "ts-node scripts/deploy.ts local",
     "deploy:base-test": "ts-node scripts/deploy.ts base-test",
     "deploy:bsc-test": "ts-node scripts/deploy.ts bsc-test",
-    "reset": "npm run clean && npm run compile"
+    "reset": "npm run clean && npm run compile",
+    "test:seq": "hardhat test test/testCore.ts && hardhat test test/testSecurity.ts && hardhat test test/testCoverage.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",

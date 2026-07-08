@@ -56,6 +56,20 @@ const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transpo
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
 const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
+// Make every writeContract wait for its receipt before returning, so a
+// following read never races an unmined tx (deterministic tests). Reverting
+// txs still throw at send time (gas estimation), so negative try/catch tests
+// are unaffected.
+function autoWaitWrites(client: any) {
+    const orig = client.writeContract.bind(client);
+    client.writeContract = async (args: any) => {
+        const hash = await orig(args);
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+    };
+}
+[buyerClient, sellerClient, ownerClient, arbiterClient].forEach(autoWaitWrites);
+
 const tokenAbi = USDTArtifact.abi;
 const tokenBytecode = USDTArtifact.bytecode as `0x${string}`;
 const escrowAbi = EscrowArtifact.abi;
@@ -136,11 +150,12 @@ function getWalletDomain(walletAddress: Address) {
 }
 
 const walletAuthorizationTypes = {
-    WalletAuthorization: [
+    PayoutAuthorization: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'wallet', type: 'address' },
         { name: 'escrowContract', type: 'address' },
         { name: 'participant', type: 'address' },
+        { name: 'outcome', type: 'uint8' },
     ],
 } as const;
 
@@ -149,17 +164,19 @@ async function signWalletAuthorization(
     signerAddress: Address,
     walletAddress: Address,
     escrowId: number,
+    outcome: number = 3, // default COMPLETE
 ) {
     return signerClient.signTypedData({
         account: signerAddress,
         domain: getWalletDomain(walletAddress),
         types: walletAuthorizationTypes,
-        primaryType: 'WalletAuthorization',
+        primaryType: 'PayoutAuthorization',
         message: {
             escrowId: BigInt(escrowId),
             wallet: walletAddress,
             escrowContract: escrowAddress,
             participant: signerAddress,
+            outcome,
         },
     });
 }
@@ -388,7 +405,7 @@ test('VIEW: getWalletAuthorizationDigest', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'getWalletAuthorizationDigest',
-        args: [BigInt(escrowId), buyer.address],
+        args: [BigInt(escrowId), buyer.address, State.COMPLETE],
     });
 
     assert.ok(digest !== '0x0000000000000000000000000000000000000000000000000000000000000000');
@@ -461,12 +478,12 @@ test('VIEW: Wallet isSignatureValid', async () => {
 
     const deal = await getDeal(escrowId);
 
-    // Seller sig should be valid
+    // Seller sig should be valid for the COMPLETE outcome it authorized
     const sellerValid = await publicClient.readContract({
         address: deal.wallet,
         abi: walletAbi,
         functionName: 'isSignatureValid',
-        args: [seller.address],
+        args: [seller.address, State.COMPLETE],
     });
     assert.equal(sellerValid, true);
 
@@ -475,7 +492,7 @@ test('VIEW: Wallet isSignatureValid', async () => {
         address: deal.wallet,
         abi: walletAbi,
         functionName: 'isSignatureValid',
-        args: [buyer.address],
+        args: [buyer.address, State.COMPLETE],
     });
     assert.equal(buyerValid, false);
 
@@ -505,7 +522,7 @@ test('VIEW: Wallet getAuthorizationDigest', async () => {
         address: deal.wallet,
         abi: walletAbi,
         functionName: 'getAuthorizationDigest',
-        args: [buyer.address],
+        args: [buyer.address, State.COMPLETE],
     });
 
     assert.ok(digest !== '0x0000000000000000000000000000000000000000000000000000000000000000');
@@ -798,7 +815,7 @@ test('EDGE: Arbiter can decide after 30-day timeout with partial evidence', asyn
     });
 
     // Try to decide immediately - should fail (no full evidence, no timeout)
-    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId);
+    const arbiterSig = await signWalletAuthorization(arbiterClient, arbiter.address, deal.wallet, escrowId, State.REFUNDED);
 
     try {
         await arbiterClient.writeContract({

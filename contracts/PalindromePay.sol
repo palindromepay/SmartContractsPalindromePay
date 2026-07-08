@@ -77,6 +77,7 @@ contract PalindromePay is ReentrancyGuard {
         uint256 amount;             // Token amount in escrow
         uint256 depositTime;        // Timestamp when buyer deposited
         uint256 maturityTime;       // Deadline for delivery
+        uint256 maturityDuration;   // Configured delivery window (seconds), re-anchored at deposit
         uint256 disputeStartTime;   // Timestamp when dispute was raised
         State state;                // Current escrow state
         bool buyerCancelRequested;  // Buyer has requested cancellation
@@ -296,25 +297,31 @@ contract PalindromePay is ReentrancyGuard {
     /// @notice Emitted when seller's wallet signature is stored
     /// @param escrowId The unique escrow identifier
     /// @param sellerSig The seller's signature
+    /// @param outcome The terminal State (COMPLETE/REFUNDED/CANCELED) the signature authorizes
     event SellerWalletSigAttached(
         uint256 indexed escrowId,
-        bytes sellerSig
+        bytes sellerSig,
+        State outcome
     );
 
     /// @notice Emitted when buyer's wallet signature is stored
     /// @param escrowId The unique escrow identifier
     /// @param buyerSig The buyer's signature
+    /// @param outcome The terminal State (COMPLETE/REFUNDED/CANCELED) the signature authorizes
     event BuyerWalletSigAttached(
         uint256 indexed escrowId,
-        bytes buyerSig
+        bytes buyerSig,
+        State outcome
     );
 
     /// @notice Emitted when arbiter's wallet signature is stored
     /// @param escrowId The unique escrow identifier
     /// @param arbiterSig The arbiter's signature
+    /// @param outcome The terminal State (COMPLETE/REFUNDED) the signature authorizes
     event ArbiterWalletSigAttached(
         uint256 indexed escrowId,
-        bytes arbiterSig
+        bytes arbiterSig,
+        State outcome
     );
 
     /// @notice Emitted when seller accepts a buyer-created escrow
@@ -587,7 +594,8 @@ contract PalindromePay is ReentrancyGuard {
         bytes calldata signature,
         uint256 escrowId,
         address walletAddr,
-        address expectedSigner
+        address expectedSigner,
+        State outcome
     ) internal view returns (bool) {
         if (signature.length != 65) return false;
         if (expectedSigner == address(0)) return false;
@@ -609,8 +617,8 @@ contract PalindromePay is ReentrancyGuard {
         if (v != 27 && v != 28) return false;
 
         // Compute digest (same as PalindromePayWallet._computeDigest)
-        bytes32 walletAuthorizationTypehash = keccak256(
-            "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
+        bytes32 payoutAuthorizationTypehash = keccak256(
+            "PayoutAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant,uint8 outcome)"
         );
 
         bytes32 walletDomainSeparator = keccak256(
@@ -624,7 +632,7 @@ contract PalindromePay is ReentrancyGuard {
         );
 
         bytes32 structHash = keccak256(
-            abi.encode(walletAuthorizationTypehash, escrowId, walletAddr, address(this), expectedSigner)
+            abi.encode(payoutAuthorizationTypehash, escrowId, walletAddr, address(this), expectedSigner, uint8(outcome))
         );
 
         bytes32 digest = keccak256(
@@ -845,8 +853,9 @@ contract PalindromePay is ReentrancyGuard {
         uint256 escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
 
-        // Verify seller signature before deploying wallet
-        if (!_verifyWalletSignature(sellerWalletSig, escrowId, predictedWallet, msg.sender)) {
+        // Verify seller signature before deploying wallet. The seller authorizes
+        // the COMPLETE outcome (release to seller) — the happy-path payout.
+        if (!_verifyWalletSignature(sellerWalletSig, escrowId, predictedWallet, msg.sender, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
 
@@ -860,7 +869,8 @@ contract PalindromePay is ReentrancyGuard {
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
-        deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
+        deal.maturityDuration = maturityTimeDays * 1 days;
+        deal.maturityTime = block.timestamp + deal.maturityDuration;
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
 
@@ -878,7 +888,7 @@ contract PalindromePay is ReentrancyGuard {
             ipfsHash
         );
         emit WalletCreated(escrowId, walletAddr);
-        emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+        emit SellerWalletSigAttached(escrowId, sellerWalletSig, State.COMPLETE);
 
         return escrowId;
     }
@@ -924,8 +934,10 @@ contract PalindromePay is ReentrancyGuard {
         escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
 
-        // Verify buyer signature before deploying wallet
-        if (!_verifyWalletSignature(buyerWalletSig, escrowId, predictedWallet, msg.sender)) {
+        // Verify buyer signature before deploying wallet. By funding, the buyer
+        // pre-authorizes the COMPLETE happy-path payout; redirecting to a refund
+        // later (cancel/dispute) overwrites this with the appropriate outcome.
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, predictedWallet, msg.sender, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
 
@@ -939,7 +951,8 @@ contract PalindromePay is ReentrancyGuard {
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
-        deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days);
+        deal.maturityDuration = maturityTimeDays * 1 days;
+        deal.maturityTime = block.timestamp + deal.maturityDuration;
         deal.state = State.AWAITING_PAYMENT;
         deal.tokenDecimals = decimals;
 
@@ -957,7 +970,7 @@ contract PalindromePay is ReentrancyGuard {
             ipfsHash
         );
         emit WalletCreated(escrowId, walletAddr);
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig, State.COMPLETE);
 
         // Effects before interactions (CEI pattern)
         deal.depositTime = block.timestamp;
@@ -989,12 +1002,21 @@ contract PalindromePay is ReentrancyGuard {
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_PAYMENT, "Not awaiting payment");
 
-        // Verify buyer signature (wallet already exists)
-        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+        // Prevent depositing into an already-expired (or same-block-expiring)
+        // escrow: otherwise the seller could seize the funds via autoRelease in
+        // the next block, leaving the buyer no cancel/dispute window. Re-anchor
+        // the maturity window to start at deposit time so the buyer always gets
+        // the full duration that was configured at creation.
+        require(block.timestamp < deal.maturityTime, "Escrow expired");
+        deal.maturityTime = block.timestamp + deal.maturityDuration;
+
+        // Verify buyer signature (wallet already exists). Depositing pre-authorizes
+        // the COMPLETE happy-path payout; cancel/dispute later overwrite it.
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
         deal.buyerWalletSig = buyerWalletSig;
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig, State.COMPLETE);
 
         // Effects before interactions (CEI pattern)
         deal.depositTime = block.timestamp;
@@ -1033,8 +1055,9 @@ contract PalindromePay is ReentrancyGuard {
         require(msg.sender == deal.seller, "Only seller");
         require(deal.state == State.AWAITING_DELIVERY, "Wrong state");
 
-        // Verify seller signature (wallet already exists)
-        if (!_verifyWalletSignature(sellerWalletSig, escrowId, deal.wallet, msg.sender)) {
+        // Verify seller signature (wallet already exists). Seller authorizes the
+        // COMPLETE outcome (release to seller).
+        if (!_verifyWalletSignature(sellerWalletSig, escrowId, deal.wallet, msg.sender, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
 
@@ -1045,7 +1068,7 @@ contract PalindromePay is ReentrancyGuard {
             emit SellerWalletSigUpdated(escrowId, sellerWalletSig);
         } else {
             emit SellerAccepted(escrowId, msg.sender);
-            emit SellerWalletSigAttached(escrowId, sellerWalletSig);
+            emit SellerWalletSigAttached(escrowId, sellerWalletSig, State.COMPLETE);
         }
     }
 
@@ -1074,12 +1097,13 @@ contract PalindromePay is ReentrancyGuard {
         );
         require(deal.sellerWalletSig.length == 65, "Missing seller sig");
 
-        // Verify buyer signature (wallet already exists)
-        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+        // Verify buyer signature (wallet already exists). Confirming delivery
+        // authorizes the COMPLETE payout to the seller.
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
         deal.buyerWalletSig = buyerWalletSig;
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig, State.COMPLETE);
 
         _setState(escrowId, State.COMPLETE);
 
@@ -1117,8 +1141,9 @@ contract PalindromePay is ReentrancyGuard {
         require(deal.depositTime != 0, "No deposit");
         require(deal.disputeStartTime == 0, "Dispute active");
 
-        // Verify wallet signature (wallet already exists)
-        if (!_verifyWalletSignature(walletSig, escrowId, deal.wallet, msg.sender)) {
+        // Verify wallet signature (wallet already exists). A cancel request
+        // authorizes the CANCELED outcome (full refund to buyer).
+        if (!_verifyWalletSignature(walletSig, escrowId, deal.wallet, msg.sender, State.CANCELED)) {
             revert InvalidWalletSignature();
         }
 
@@ -1128,12 +1153,12 @@ contract PalindromePay is ReentrancyGuard {
         if (isBuyer) {
             require(!deal.buyerCancelRequested, "Buyer already requested");
             deal.buyerWalletSig = walletSig;
-            emit BuyerWalletSigAttached(escrowId, walletSig);
+            emit BuyerWalletSigAttached(escrowId, walletSig, State.CANCELED);
             deal.buyerCancelRequested = true;
         } else {
             require(!deal.sellerCancelRequested, "Seller already requested");
             deal.sellerWalletSig = walletSig;
-            emit SellerWalletSigAttached(escrowId, walletSig);
+            emit SellerWalletSigAttached(escrowId, walletSig, State.CANCELED);
             deal.sellerCancelRequested = true;
         }
 
@@ -1333,12 +1358,14 @@ contract PalindromePay is ReentrancyGuard {
 
         arbiterDecisionSubmitted[escrowId] = true;
 
-        // Verify arbiter signature (wallet already exists)
-        if (!_verifyWalletSignature(arbiterWalletSig, escrowId, deal.wallet, msg.sender)) {
+        // Verify arbiter signature (wallet already exists). The arbiter signs the
+        // exact resolution outcome they are ruling for (COMPLETE or REFUNDED); a
+        // signature for one cannot authorize the other.
+        if (!_verifyWalletSignature(arbiterWalletSig, escrowId, deal.wallet, msg.sender, resolution)) {
             revert InvalidWalletSignature();
         }
         deal.arbiterWalletSig = arbiterWalletSig;
-        emit ArbiterWalletSigAttached(escrowId, arbiterWalletSig);
+        emit ArbiterWalletSigAttached(escrowId, arbiterWalletSig, resolution);
 
         _setState(escrowId, resolution);
 
@@ -1378,12 +1405,13 @@ contract PalindromePay is ReentrancyGuard {
         );
         require(!arbiterDecisionSubmitted[escrowId], "Decision already submitted");
 
-        // Verify buyer wallet signature
-        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender)) {
+        // Verify buyer wallet signature. Claiming a post-dispute-timeout refund
+        // authorizes the REFUNDED outcome (full refund to buyer).
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, msg.sender, State.REFUNDED)) {
             revert InvalidWalletSignature();
         }
         deal.buyerWalletSig = buyerWalletSig;
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig, State.REFUNDED);
 
         _setState(escrowId, State.REFUNDED);
         _proposePayout(escrowId, deal.buyer, false);
@@ -1452,12 +1480,13 @@ contract PalindromePay is ReentrancyGuard {
         _useSignature(escrowId, coordSignature);
         _useNonce(escrowId, deal.buyer, nonce);
 
-        // Verify buyer wallet sig cryptographically (not just format)
-        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, deal.buyer)) {
+        // Verify buyer wallet sig cryptographically (not just format).
+        // Authorizes the COMPLETE payout to the seller.
+        if (!_verifyWalletSignature(buyerWalletSig, escrowId, deal.wallet, deal.buyer, State.COMPLETE)) {
             revert InvalidWalletSignature();
         }
         deal.buyerWalletSig = buyerWalletSig;
-        emit BuyerWalletSigAttached(escrowId, buyerWalletSig);
+        emit BuyerWalletSigAttached(escrowId, buyerWalletSig, State.COMPLETE);
 
         _setState(escrowId, State.COMPLETE);
 
@@ -1549,13 +1578,16 @@ contract PalindromePay is ReentrancyGuard {
     }
 
     /**
-     * @notice Computes the wallet authorization digest for a participant
-     * @dev Frontend can use this to generate the correct signature
+     * @notice Computes the payout authorization digest for a participant + outcome
+     * @dev Frontend can use this to generate the correct signature. `outcome` is
+     *      the terminal State the participant authorizes (COMPLETE=3, REFUNDED=4,
+     *      CANCELED=5).
      * @param escrowId The escrow ID
      * @param participant The participant's address
+     * @param outcome The terminal State the signature authorizes
      * @return digest The EIP-712 digest to sign
      */
-    function getWalletAuthorizationDigest(uint256 escrowId, address participant)
+    function getWalletAuthorizationDigest(uint256 escrowId, address participant, State outcome)
         external
         view
         escrowExists(escrowId)
@@ -1569,8 +1601,8 @@ contract PalindromePay is ReentrancyGuard {
             "Not a participant"
         );
 
-        bytes32 walletAuthorizationTypehash = keccak256(
-            "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
+        bytes32 payoutAuthorizationTypehash = keccak256(
+            "PayoutAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant,uint8 outcome)"
         );
 
         bytes32 walletDomainSeparator = keccak256(
@@ -1585,11 +1617,12 @@ contract PalindromePay is ReentrancyGuard {
 
         bytes32 structHash = keccak256(
             abi.encode(
-                walletAuthorizationTypehash,
+                payoutAuthorizationTypehash,
                 escrowId,
                 deal.wallet,
                 address(this),
-                participant
+                participant,
+                uint8(outcome)
             )
         );
 

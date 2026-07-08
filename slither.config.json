@@ -1,0 +1,5 @@
+{
+  "compile_force_framework": "foundry",
+  "filter_paths": "node_modules|contracts/USDT.sol",
+  "exclude_informational": false
+}

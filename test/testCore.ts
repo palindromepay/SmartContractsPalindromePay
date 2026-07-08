@@ -56,6 +56,21 @@ const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transpo
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
 const arbiterClient = createWalletClient({ account: arbiter, chain: CHAIN, transport: http(rpcUrl) });
 
+// Make every writeContract wait for its receipt before returning, so a
+// following read never races an unmined tx (deterministic tests). Reverting
+// txs still throw at send time (gas estimation), so negative try/catch tests
+// are unaffected.
+function autoWaitWrites(client: any) {
+    const orig = client.writeContract.bind(client);
+    client.writeContract = async (args: any) => {
+        const hash = await orig(args);
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+    };
+    return client;
+}
+[buyerClient, sellerClient, ownerClient, arbiterClient].forEach(autoWaitWrites);
+
 // ────────────────────────────────────────────────────────────────────────────
 // ARTIFACTS / CONSTANTS
 // ────────────────────────────────────────────────────────────────────────────
@@ -273,11 +288,12 @@ async function signStartDispute(
  * Includes escrowContract for replay protection across deployments
  */
 const walletAuthorizationTypes = {
-    WalletAuthorization: [
+    PayoutAuthorization: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'wallet', type: 'address' },
         { name: 'escrowContract', type: 'address' },
         { name: 'participant', type: 'address' },
+        { name: 'outcome', type: 'uint8' },
     ],
 } as const;
 
@@ -290,19 +306,21 @@ async function signWalletAuthorization(
     signerAddress: Address,
     walletAddress: Address,
     escrowId: number,
+    outcome: number = 3, // default COMPLETE
 ) {
     const message = {
         escrowId: BigInt(escrowId),
         wallet: walletAddress,
         escrowContract: escrowAddress, // Include escrow contract for replay protection
         participant: signerAddress, // Participant signs their OWN address
+        outcome,
     } as const;
 
     return signerClient.signTypedData({
         account: signerAddress,
         domain: getWalletDomain(walletAddress),
         types: walletAuthorizationTypes,
-        primaryType: 'WalletAuthorization',
+        primaryType: 'PayoutAuthorization',
         message,
     });
 }
@@ -465,13 +483,13 @@ async function withdraw(
 /**
  * Gets valid signature count from wallet
  */
-async function getValidSignatureCount(walletAddress: Address): Promise<number> {
+async function getValidSignatureCount(walletAddress: Address, outcome: number = 3): Promise<number> {
     return Number(
         await publicClient.readContract({
             address: walletAddress,
             abi: walletAbi,
             functionName: 'getValidSignatureCount',
-            args: [],
+            args: [outcome],
         }),
     );
 }
@@ -677,12 +695,15 @@ test('Scenario 2: Timeout Refund - Buyer gets full refund after timeout', async 
         args: [BigInt(escrowId), buyerSig],
     });
 
-    // Buyer requests cancel
+    // Buyer requests cancel (authorizes the CANCELED outcome)
+    const buyerCancelSig = await signWalletAuthorization(
+        buyerClient, buyer.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await buyerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), buyerSig],
+        args: [BigInt(escrowId), buyerCancelSig],
     });
 
     const deal1 = await getDeal(escrowId);
@@ -705,9 +726,10 @@ test('Scenario 2: Timeout Refund - Buyer gets full refund after timeout', async 
     const deal2 = await getDeal(escrowId);
     assert.equal(deal2.state, State.CANCELED, 'Should be CANCELED');
 
-    // Verify 2 signatures (buyer from deposit, seller from creation)
-    const sigCount = await getValidSignatureCount(deal2.wallet);
-    assert.ok(sigCount >= 2, `Need at least 2 valid signatures, got ${sigCount}`);
+    // For a unilateral timeout cancel, only the buyer authorized CANCELED; the
+    // wallet's beneficiary single-signature path covers this.
+    const sigCount = await getValidSignatureCount(deal2.wallet, State.CANCELED);
+    assert.ok(sigCount >= 1, `Need at least 1 valid CANCELED signature, got ${sigCount}`);
     console.log(`   Valid signatures: ${sigCount}/3`);
 
     // Buyer withdraws (full refund, no fee)
@@ -777,24 +799,30 @@ test('Scenario 3: Mutual Cancel - Both parties agree, buyer gets full refund', a
         args: [BigInt(escrowId), buyerSig],
     });
 
-    // Buyer requests cancel
+    // Buyer requests cancel (authorizes CANCELED)
+    const buyerCancelSig = await signWalletAuthorization(
+        buyerClient, buyer.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await buyerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), buyerSig],
+        args: [BigInt(escrowId), buyerCancelSig],
     });
 
     const deal1 = await getDeal(escrowId);
     assert.equal(deal1.buyerCancelRequested, true);
     assert.equal(deal1.state, State.AWAITING_DELIVERY); // Not yet canceled
 
-    // Seller also requests cancel (completes mutual cancel)
+    // Seller also requests cancel (authorizes CANCELED, completes mutual cancel)
+    const sellerCancelSig = await signWalletAuthorization(
+        sellerClient, seller.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await sellerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), sellerSig],
+        args: [BigInt(escrowId), sellerCancelSig],
     });
 
     const deal2 = await getDeal(escrowId);
@@ -802,9 +830,9 @@ test('Scenario 3: Mutual Cancel - Both parties agree, buyer gets full refund', a
     assert.equal(deal2.buyerCancelRequested, true);
     assert.equal(deal2.sellerCancelRequested, true);
 
-    // Verify 2-of-3 signatures
-    const sigCount = await getValidSignatureCount(deal2.wallet);
-    assert.ok(sigCount >= 2, `Need at least 2 valid signatures, got ${sigCount}`);
+    // Verify 2-of-3 signatures authorize the CANCELED outcome
+    const sigCount = await getValidSignatureCount(deal2.wallet, State.CANCELED);
+    assert.ok(sigCount >= 2, `Need at least 2 valid CANCELED signatures, got ${sigCount}`);
     console.log(`   Valid signatures: ${sigCount}/3`);
 
     // Buyer withdraws (full refund, no fee)
@@ -928,12 +956,13 @@ test('Scenario 4A: Dispute - Arbiter rules for buyer (REFUNDED) using startDispu
         args: [BigInt(escrowId), Role.Seller, 'QmSellerEvidence'],
     });
 
-    // Arbiter decides for buyer (REFUNDED)
+    // Arbiter decides for buyer (REFUNDED) — signs the REFUNDED outcome
     const arbiterWalletSig = await signWalletAuthorization(
         arbiterClient,
         arbiter.address,
         deal0.wallet,
         escrowId,
+        State.REFUNDED,
     );
 
     await arbiterClient.writeContract({
@@ -951,9 +980,9 @@ test('Scenario 4A: Dispute - Arbiter rules for buyer (REFUNDED) using startDispu
     const deal3 = await getDeal(escrowId);
     assert.equal(deal3.state, State.REFUNDED, 'Should be REFUNDED');
 
-    // Verify signatures: buyer + arbiter
-    const sigCount = await getValidSignatureCount(deal3.wallet);
-    assert.ok(sigCount >= 2, `Need at least 2 valid signatures, got ${sigCount}`);
+    // Arbiter alone authorizes REFUNDED (dispute tie-breaker / authority path)
+    const sigCount = await getValidSignatureCount(deal3.wallet, State.REFUNDED);
+    assert.ok(sigCount >= 1, `Need at least 1 valid REFUNDED signature, got ${sigCount}`);
     console.log(`   Valid signatures: ${sigCount}/3`);
 
     // Buyer withdraws (full refund)
@@ -1382,7 +1411,7 @@ test('Security: Only participants can withdraw', async () => {
     // Create a random non-participant account
     const randomKey = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as `0x${string}`;
     const randomAccount = privateKeyToAccount(randomKey);
-    const randomClient = createWalletClient({ account: randomAccount, chain: CHAIN, transport: http(rpcUrl) });
+    const randomClient = autoWaitWrites(createWalletClient({ account: randomAccount, chain: CHAIN, transport: http(rpcUrl) }));
 
     // Note: In Foundry, all accounts have ETH, but in real scenario this would fail
     // The important check is the OnlyParticipant modifier
@@ -1560,12 +1589,15 @@ test('Scenario 6B: Auto-Release blocked by buyer cancel request', async () => {
         args: [BigInt(escrowId), buyerWalletSig],
     });
 
-    // Buyer requests cancel
+    // Buyer requests cancel (authorizes CANCELED)
+    const buyerCancelSig = await signWalletAuthorization(
+        buyerClient, buyer.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await buyerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), buyerWalletSig],
+        args: [BigInt(escrowId), buyerCancelSig],
     });
 
     const deal1 = await getDeal(escrowId);
@@ -1860,12 +1892,15 @@ test('Scenario 7A: cancelByTimeout fails without arbiter', async () => {
         args: [BigInt(escrowId), buyerSig],
     });
 
-    // Buyer requests cancel
+    // Buyer requests cancel (authorizes CANCELED)
+    const buyerCancelSig = await signWalletAuthorization(
+        buyerClient, buyer.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await buyerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), buyerSig],
+        args: [BigInt(escrowId), buyerCancelSig],
     });
 
     // Fast forward past maturity + grace period
@@ -1891,12 +1926,15 @@ test('Scenario 7A: cancelByTimeout fails without arbiter', async () => {
         console.log('   ✅ cancelByTimeout correctly blocked without arbiter');
     }
 
-    // However, mutual cancel should still work
+    // However, mutual cancel should still work (seller authorizes CANCELED)
+    const sellerCancelSig = await signWalletAuthorization(
+        sellerClient, seller.address, deal0.wallet, escrowId, State.CANCELED,
+    );
     await sellerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'requestCancel',
-        args: [BigInt(escrowId), sellerSig],
+        args: [BigInt(escrowId), sellerCancelSig],
     });
 
     const deal1 = await getDeal(escrowId);

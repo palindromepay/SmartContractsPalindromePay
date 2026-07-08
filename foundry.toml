@@ -1,0 +1,13 @@
+# Foundry config — used ONLY so Slither can compile via `forge` (which supports
+# viaIR) instead of the Hardhat-3 path that crytic-compile cannot parse.
+# Hardhat ignores this file; the primary toolchain remains hardhat.config.ts.
+# Settings mirror hardhat.config.ts so Slither analyzes the same AST/bytecode.
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["node_modules"]
+solc = "0.8.29"
+evm_version = "cancun"
+optimizer = true
+via_ir = true
+remappings = ["@openzeppelin/=node_modules/@openzeppelin/"]

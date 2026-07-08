@@ -25,6 +25,7 @@ interface IPalindromePay {
         uint256 amount;
         uint256 depositTime;
         uint256 maturityTime;
+        uint256 maturityDuration;
         uint256 disputeStartTime;
         State state;
         bool buyerCancelRequested;
@@ -72,9 +73,12 @@ contract PalindromePayWallet is ReentrancyGuard {
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
 
-    /// @dev The message participants sign to authorize wallet operations
-    bytes32 private constant WALLET_AUTHORIZATION_TYPEHASH = keccak256(
-        "WalletAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant)"
+    /// @dev The message participants sign to authorize a specific payout outcome.
+    ///      `outcome` is the terminal State (COMPLETE=3, REFUNDED=4, CANCELED=5)
+    ///      the signer consents to. A signature for one outcome can never satisfy
+    ///      a withdrawal that resolves to a different outcome.
+    bytes32 private constant PAYOUT_AUTHORIZATION_TYPEHASH = keccak256(
+        "PayoutAuthorization(uint256 escrowId,address wallet,address escrowContract,address participant,uint8 outcome)"
     );
 
     // ---------------------------------------------------------------------
@@ -213,18 +217,21 @@ contract PalindromePayWallet is ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /**
-     * @dev Computes the EIP-712 digest for a participant's authorization
+     * @dev Computes the EIP-712 digest for a participant's authorization of a
+     *      specific payout outcome.
      * @param participant The participant's address
+     * @param outcome The terminal State (COMPLETE/REFUNDED/CANCELED) authorized
      * @return The digest to sign
      */
-    function _computeDigest(address participant) internal view returns (bytes32) {
+    function _computeDigest(address participant, uint8 outcome) internal view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
-                WALLET_AUTHORIZATION_TYPEHASH,
+                PAYOUT_AUTHORIZATION_TYPEHASH,
                 ESCROW_ID,
                 address(this),
                 ESCROW_CONTRACT,
-                participant
+                participant,
+                outcome
             )
         );
 
@@ -234,14 +241,18 @@ contract PalindromePayWallet is ReentrancyGuard {
     }
 
     /**
-     * @dev Validates and verifies a signature against expected signer
+     * @dev Validates and verifies a signature against expected signer for a
+     *      specific outcome. A signature only counts for the exact outcome it
+     *      was produced for.
      * @param signature The 65-byte signature
      * @param expectedSigner The address that should have signed
-     * @return True if signature is valid and matches expected signer
+     * @param outcome The outcome the signature must authorize
+     * @return True if signature is valid and matches expected signer + outcome
      */
     function _isValidSignature(
         bytes memory signature,
-        address expectedSigner
+        address expectedSigner,
+        uint8 outcome
     ) internal view returns (bool) {
         if (signature.length != 65) return false;
         if (expectedSigner == address(0)) return false;
@@ -265,29 +276,50 @@ contract PalindromePayWallet is ReentrancyGuard {
         // Check v is valid
         if (v != 27 && v != 28) return false;
 
-        bytes32 digest = _computeDigest(expectedSigner);
+        bytes32 digest = _computeDigest(expectedSigner, outcome);
         address recovered = ECDSA.recover(digest, v, r, s);
 
         return recovered == expectedSigner;
     }
 
     /**
-     * @dev Counts valid signatures from the escrow deal
+     * @dev Evaluates whether the 2-of-3 (or authoritative single-signer)
+     *      authorization is satisfied for a given terminal outcome.
      * @param deal The escrow deal struct
-     * @return count Number of valid signatures (0-3)
+     * @param outcome The terminal State the withdrawal resolves to
+     * @param beneficiary The address that receives funds for this outcome
+     * @return authorized True if the withdrawal is authorized
      */
-    function _countValidSignatures(
-        IPalindromePay.EscrowDeal memory deal
-    ) internal view returns (uint256 count) {
-        if (_isValidSignature(deal.buyerWalletSig, deal.buyer)) {
-            count++;
+    function _isAuthorized(
+        IPalindromePay.EscrowDeal memory deal,
+        uint8 outcome,
+        address beneficiary
+    ) internal view returns (bool authorized) {
+        bool bValid = _isValidSignature(deal.buyerWalletSig, deal.buyer, outcome);
+        bool sValid = _isValidSignature(deal.sellerWalletSig, deal.seller, outcome);
+        bool aValid = _isValidSignature(deal.arbiterWalletSig, deal.arbiter, outcome);
+
+        uint256 count = 0;
+        if (bValid) count++;
+        if (sValid) count++;
+        if (aValid) count++;
+
+        // Cooperative / arbiter-plus-party path: any 2 of 3 authorize the outcome.
+        if (count >= 2) return true;
+
+        // Authoritative single-signer path (covers the unilateral timeout flows):
+        //   - the arbiter alone (dispute tie-breaker), or
+        //   - the sole beneficiary alone (autoRelease / cancelByTimeout / refund).
+        // The escrow state machine independently gates whether the corresponding
+        // terminal state could be reached, so a lone beneficiary signature can
+        // never move funds without the on-chain timeout/authority condition.
+        if (count == 1) {
+            if (aValid) return true;
+            if (bValid && beneficiary == deal.buyer) return true;
+            if (sValid && beneficiary == deal.seller) return true;
         }
-        if (_isValidSignature(deal.sellerWalletSig, deal.seller)) {
-            count++;
-        }
-        if (_isValidSignature(deal.arbiterWalletSig, deal.arbiter)) {
-            count++;
-        }
+
+        return false;
     }
 
     // ---------------------------------------------------------------------
@@ -361,9 +393,15 @@ contract PalindromePayWallet is ReentrancyGuard {
             revert OnlyParticipant();
         }
 
-        // Verify 2-of-3 signatures
-        uint256 validSigs = _countValidSignatures(deal);
-        if (validSigs < 2) revert InsufficientSignatures();
+        // Determine beneficiary for this terminal outcome, then verify that the
+        // participants authorized *this specific outcome* (not merely "some"
+        // outcome). A COMPLETE authorization can no longer release a refund and
+        // vice versa.
+        address beneficiary =
+            (state == IPalindromePay.State.COMPLETE) ? deal.seller : deal.buyer;
+        if (!_isAuthorized(deal, uint8(state), beneficiary)) {
+            revert InsufficientSignatures();
+        }
 
         // Mark as withdrawn before external calls
         withdrawn = true;
@@ -433,43 +471,49 @@ contract PalindromePayWallet is ReentrancyGuard {
     }
 
     /**
-     * @notice Returns the digest a participant should sign
+     * @notice Returns the digest a participant should sign to authorize a
+     *         specific payout outcome
      * @param participant The participant's address
+     * @param outcome The terminal State (COMPLETE=3, REFUNDED=4, CANCELED=5)
      * @return The EIP-712 digest to sign
      */
-    function getAuthorizationDigest(address participant)
+    function getAuthorizationDigest(address participant, uint8 outcome)
         external
         view
         returns (bytes32)
     {
-        return _computeDigest(participant);
+        return _computeDigest(participant, outcome);
     }
 
     /**
-     * @notice Returns the number of valid signatures currently stored
-     * @return count Number of valid signatures (0-3)
+     * @notice Returns the number of valid signatures stored for a given outcome
+     * @param outcome The terminal State to check signatures against
+     * @return count Number of valid signatures (0-3) authorizing that outcome
      */
-    function getValidSignatureCount() external view returns (uint256 count) {
+    function getValidSignatureCount(uint8 outcome) external view returns (uint256 count) {
         IPalindromePay.EscrowDeal memory deal =
             IPalindromePay(ESCROW_CONTRACT).getEscrow(ESCROW_ID);
-        return _countValidSignatures(deal);
+        if (_isValidSignature(deal.buyerWalletSig, deal.buyer, outcome)) count++;
+        if (_isValidSignature(deal.sellerWalletSig, deal.seller, outcome)) count++;
+        if (_isValidSignature(deal.arbiterWalletSig, deal.arbiter, outcome)) count++;
     }
 
     /**
-     * @notice Checks if a participant's stored signature is valid
+     * @notice Checks if a participant's stored signature is valid for an outcome
      * @param participant The participant to check
-     * @return True if the participant's signature is valid
+     * @param outcome The terminal State to check against
+     * @return True if the participant's signature authorizes that outcome
      */
-    function isSignatureValid(address participant) external view returns (bool) {
+    function isSignatureValid(address participant, uint8 outcome) external view returns (bool) {
         IPalindromePay.EscrowDeal memory deal =
             IPalindromePay(ESCROW_CONTRACT).getEscrow(ESCROW_ID);
 
         if (participant == deal.buyer) {
-            return _isValidSignature(deal.buyerWalletSig, deal.buyer);
+            return _isValidSignature(deal.buyerWalletSig, deal.buyer, outcome);
         } else if (participant == deal.seller) {
-            return _isValidSignature(deal.sellerWalletSig, deal.seller);
+            return _isValidSignature(deal.sellerWalletSig, deal.seller, outcome);
         } else if (participant == deal.arbiter) {
-            return _isValidSignature(deal.arbiterWalletSig, deal.arbiter);
+            return _isValidSignature(deal.arbiterWalletSig, deal.arbiter, outcome);
         }
         return false;
     }
