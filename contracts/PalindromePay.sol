@@ -246,6 +246,11 @@ contract PalindromePay is ReentrancyGuard {
     /// @param initiator The address that started the dispute
     event DisputeStarted(uint256 indexed escrowId, address indexed initiator);
 
+    /// @notice Emitted when an arbiter is set after creation via mutual consent
+    /// @param escrowId The unique escrow identifier
+    /// @param arbiter The newly agreed arbiter
+    event ArbiterSet(uint256 indexed escrowId, address indexed arbiter);
+
     /// @notice Emitted when arbiter resolves a dispute
     /// @param escrowId The unique escrow identifier
     /// @param resolution The final state (COMPLETE or REFUNDED)
@@ -678,6 +683,11 @@ contract PalindromePay is ReentrancyGuard {
     /// @dev Type hash for startDisputeSigned
     bytes32 private constant START_DISPUTE_TYPEHASH = keccak256(
         "StartDispute(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
+    );
+
+    /// @dev Type hash for setArbiterSigned (both buyer and seller sign this)
+    bytes32 private constant SET_ARBITER_TYPEHASH = keccak256(
+        "SetArbiter(uint256 escrowId,address newArbiter,uint256 deadline,uint256 nonce)"
     );
 
     /// @dev Returns domain separator, recomputing if chain ID changed (fork)
@@ -1249,6 +1259,78 @@ contract PalindromePay is ReentrancyGuard {
         (, uint256 fee) = _proposePayout(escrowId, deal.seller, true);
 
         emit AutoReleased(escrowId, deal.seller, deal.amount, fee);
+    }
+
+    // ---------------------------------------------------------------------
+    // Late arbiter assignment (mutual consent)
+    // ---------------------------------------------------------------------
+
+    /**
+     * @notice Assigns an arbiter to an escrow that was created without one,
+     *         unlocking the dispute path. Requires BOTH buyer and seller to
+     *         have signed the same arbiter address via EIP-712.
+     * @dev Set-only (no swap): allowed exactly once, while arbiter is unset and
+     *      the escrow is not yet in a terminal/disputed state. Both signatures
+     *      are mandatory — a single party must not be able to install an arbiter
+     *      over the counterparty's funds. The arbiter's own participation is
+     *      proven later at submitArbiterDecision; no arbiter signature is needed
+     *      here.
+     * @param escrowId The escrow ID
+     * @param newArbiter The agreed arbiter address (must be an EOA)
+     * @param buyerSig Buyer's EIP-712 signature over the SetArbiter struct
+     * @param sellerSig Seller's EIP-712 signature over the SetArbiter struct
+     * @param deadline Signature deadline (max 1 day out)
+     * @param nonce Shared nonce, consumed for both signers
+     */
+    function setArbiterSigned(
+        uint256 escrowId,
+        address newArbiter,
+        bytes calldata buyerSig,
+        bytes calldata sellerSig,
+        uint256 deadline,
+        uint256 nonce
+    ) external nonReentrant escrowExists(escrowId) {
+        EscrowDeal storage deal = escrows[escrowId];
+
+        require(deal.arbiter == address(0), "Arbiter already set");
+        require(
+            deal.state == State.AWAITING_PAYMENT ||
+                deal.state == State.AWAITING_DELIVERY,
+            "Wrong state"
+        );
+        require(
+            deadline > block.timestamp && deadline < block.timestamp + 1 days,
+            "Invalid deadline"
+        );
+
+        // Same arbiter eligibility rules as at creation.
+        require(newArbiter != address(0), "Zero arbiter");
+        require(
+            newArbiter != deal.buyer && newArbiter != deal.seller,
+            "Invalid arbiter"
+        );
+        require(newArbiter.code.length == 0, "Arbiter must be EOA");
+        require(newArbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
+
+        // Verify both parties signed this exact (escrow, arbiter, deadline, nonce).
+        _validateSignatureFormat(buyerSig);
+        _validateSignatureFormat(sellerSig);
+
+        bytes32 structHash = keccak256(
+            abi.encode(SET_ARBITER_TYPEHASH, escrowId, newArbiter, deadline, nonce)
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
+
+        require(ECDSA.recover(digest, buyerSig) == deal.buyer, "Bad buyer sig");
+        require(ECDSA.recover(digest, sellerSig) == deal.seller, "Bad seller sig");
+
+        _useNonce(escrowId, deal.buyer, nonce);
+        _useNonce(escrowId, deal.seller, nonce);
+
+        deal.arbiter = newArbiter;
+        emit ArbiterSet(escrowId, newArbiter);
     }
 
     // ---------------------------------------------------------------------

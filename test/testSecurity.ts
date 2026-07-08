@@ -367,6 +367,57 @@ async function createAndDepositEscrow(): Promise<{ escrowId: number; deal: any }
     return { escrowId, deal: await getDeal(escrowId) };
 }
 
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000' as Address;
+
+const setArbiterTypes = {
+    SetArbiter: [
+        { name: 'escrowId', type: 'uint256' },
+        { name: 'newArbiter', type: 'address' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+    ],
+} as const;
+
+async function signSetArbiter(
+    signerClient: any,
+    signerAddress: Address,
+    escrowId: number,
+    newArbiter: Address,
+    deadline: bigint,
+    nonce: bigint,
+) {
+    return signerClient.signTypedData({
+        account: signerAddress,
+        domain: getEscrowDomain(),
+        types: setArbiterTypes,
+        primaryType: 'SetArbiter',
+        message: { escrowId: BigInt(escrowId), newArbiter, deadline, nonce },
+    });
+}
+
+// Arbiterless funded escrow (arbiter == address(0)).
+async function createArbiterlessDeposited(): Promise<{ escrowId: number; deal: any }> {
+    await fundAndApprove(buyerClient, buyer.address);
+    const escrowId = await getNextEscrowId();
+    const predictedWallet = computePredictedWallet(escrowId);
+    const sellerSig = await signWalletAuthorization(sellerClient, seller.address, predictedWallet, escrowId);
+    await sellerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'createEscrow',
+        args: [tokenAddress, buyer.address, AMOUNT, 30n, ZERO_ADDR, 'No Arbiter', 'QmTest', sellerSig],
+    });
+    const deal = await getDeal(escrowId);
+    const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [BigInt(escrowId), buyerSig],
+    });
+    return { escrowId, deal: await getDeal(escrowId) };
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 1. REENTRANCY TESTS
 // ════════════════════════════════════════════════════════════════════════════
@@ -1405,6 +1456,105 @@ test('SECURITY: Validation - Arbiter cannot be fee receiver', async () => {
 // ════════════════════════════════════════════════════════════════════════════
 // SUMMARY
 // ════════════════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════════════════
+// LATE ARBITER ASSIGNMENT (mutual consent) — Phase E
+// ════════════════════════════════════════════════════════════════════════════
+
+test('SECURITY: setArbiter - both parties agree, unlocks dispute', async () => {
+    console.log('\n🔒 SET ARBITER TEST: mutual consent happy path');
+    const { escrowId } = await createArbiterlessDeposited();
+
+    // Dispute blocked while arbiterless
+    await assert.rejects(sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [BigInt(escrowId)],
+    }));
+
+    const deadline = (await getBlockTimestamp()) + 3600n;
+    const bSig = await signSetArbiter(buyerClient, buyer.address, escrowId, arbiter.address, deadline, 0n);
+    const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, deadline, 0n);
+
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+        args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+    });
+
+    const deal = await getDeal(escrowId);
+    assert.equal(deal.arbiter.toLowerCase(), arbiter.address.toLowerCase(), 'arbiter should be set');
+
+    // Dispute now works
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [BigInt(escrowId)],
+    });
+    assert.equal((await getDeal(escrowId)).state, State.DISPUTED);
+    console.log('   ✅ Arbiter set by mutual consent; dispute unlocked');
+});
+
+test('SECURITY: setArbiter - single-party consent is rejected', async () => {
+    console.log('\n🔒 SET ARBITER TEST: one-sided attempt must fail');
+    const { escrowId } = await createArbiterlessDeposited();
+    const deadline = (await getBlockTimestamp()) + 3600n;
+
+    // Only the buyer signs; the seller slot carries the buyer's sig too.
+    const bSig = await signSetArbiter(buyerClient, buyer.address, escrowId, arbiter.address, deadline, 0n);
+    await assert.rejects(
+        buyerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+            args: [BigInt(escrowId), arbiter.address, bSig, bSig, deadline, 0n],
+        }),
+        (e: any) => /Bad seller sig|revert/.test(e.message),
+    );
+    assert.equal((await getDeal(escrowId)).arbiter.toLowerCase(), ZERO_ADDR, 'arbiter must stay unset');
+    console.log('   ✅ Seller cannot be impersonated; arbiter unchanged');
+});
+
+test('SECURITY: setArbiter - rejects buyer/seller/fee-receiver as arbiter', async () => {
+    console.log('\n🔒 SET ARBITER TEST: ineligible arbiters rejected');
+    const { escrowId } = await createArbiterlessDeposited();
+    const deadline = (await getBlockTimestamp()) + 3600n;
+    for (const bad of [buyer.address, seller.address] as Address[]) {
+        const bSig = await signSetArbiter(buyerClient, buyer.address, escrowId, bad, deadline, 0n);
+        const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, bad, deadline, 0n);
+        await assert.rejects(buyerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+            args: [BigInt(escrowId), bad, bSig, sSig, deadline, 0n],
+        }));
+    }
+    console.log('   ✅ Buyer/seller cannot be installed as arbiter');
+});
+
+test('SECURITY: setArbiter - cannot set twice (replay) and rejects expired deadline', async () => {
+    console.log('\n🔒 SET ARBITER TEST: single-use + deadline');
+    const { escrowId } = await createArbiterlessDeposited();
+
+    // Expired deadline rejected
+    const past = (await getBlockTimestamp()) - 10n;
+    const bExp = await signSetArbiter(buyerClient, buyer.address, escrowId, arbiter.address, past, 0n);
+    const sExp = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, past, 0n);
+    await assert.rejects(buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+        args: [BigInt(escrowId), arbiter.address, bExp, sExp, past, 0n],
+    }));
+
+    // Valid set
+    const deadline = (await getBlockTimestamp()) + 3600n;
+    const bSig = await signSetArbiter(buyerClient, buyer.address, escrowId, arbiter.address, deadline, 0n);
+    const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, deadline, 0n);
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+        args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+    });
+
+    // Replay with same sigs rejected (arbiter already set)
+    await assert.rejects(
+        buyerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+            args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+        }),
+        (e: any) => /Arbiter already set|revert/.test(e.message),
+    );
+    console.log('   ✅ One-shot set; expired deadline and replay both rejected');
+});
 
 test('Security Test Summary', async () => {
     console.log('\n═══════════════════════════════════════════════════════════════');
