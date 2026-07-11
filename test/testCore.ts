@@ -543,6 +543,7 @@ test('Scenario 1: Happy Path - Seller creates, buyer confirms (gasless), seller 
             AMOUNT,
             1n, // 1 day maturity
             arbiter.address, // arbiter
+            0n,
             'Happy Path Escrow',
             'QmHappyPath',
             sellerWalletSig,
@@ -671,7 +672,7 @@ test('Scenario 2: Timeout Refund - Buyer gets full refund after timeout', async 
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            arbiter.address,
+            arbiter.address, 0n,
             'Timeout Escrow',
             'QmTimeout',
             sellerSig,
@@ -776,6 +777,7 @@ test('Scenario 3: Mutual Cancel - Both parties agree, buyer gets full refund', a
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Mutual Cancel Escrow',
             'QmMutualCancel',
             sellerSig,
@@ -884,6 +886,7 @@ test('Scenario 4A: Dispute - Arbiter rules for buyer (REFUNDED) using startDispu
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Dispute Escrow - Buyer Wins',
             'QmDisputeBuyerWins',
             sellerWalletSig,
@@ -1029,6 +1032,7 @@ test('Scenario 4B: Dispute - Arbiter rules for seller (COMPLETE)', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Dispute Escrow - Seller Wins',
             'QmDisputeSellerWins',
             sellerSig,
@@ -1154,6 +1158,7 @@ test('Scenario 5: Buyer creates escrow and deposits in one transaction', async (
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Buyer Created Escrow',
             'QmBuyerCreated',
             buyerWalletSig,
@@ -1252,7 +1257,7 @@ test('Security: Cannot withdraw before final state', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Security Test', 'QmSec', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Security Test', 'QmSec', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1295,7 +1300,7 @@ test('Security: Cannot withdraw with insufficient signatures', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Sig Test', 'QmSigTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Sig Test', 'QmSigTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1334,7 +1339,7 @@ test('Security: Cannot double withdraw', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Double Withdraw Test', 'QmDouble', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Double Withdraw Test', 'QmDouble', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1387,7 +1392,7 @@ test('Security: Only participants can withdraw', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Participant Test', 'QmPart', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Participant Test', 'QmPart', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -1453,7 +1458,7 @@ test('Scenario 6A: Auto-Release - Seller claims after grace period (buyer unresp
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            arbiter.address,
+            arbiter.address, 0n,
             'Auto-Release Escrow',
             'QmAutoRelease',
             sellerWalletSig,
@@ -1566,6 +1571,7 @@ test('Scenario 6B: Auto-Release blocked by buyer cancel request', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Auto-Release Cancel Block',
             'QmCancelBlock',
             sellerWalletSig,
@@ -1676,6 +1682,7 @@ test('Scenario 6C: Auto-Release blocked by active dispute', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Auto-Release Dispute Block',
             'QmDisputeBlock',
             sellerWalletSig,
@@ -1762,6 +1769,7 @@ test('Security: Only seller can call autoRelease', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Only Seller Test',
             'QmOnlySeller',
             sellerWalletSig,
@@ -1869,6 +1877,7 @@ test('Scenario 7A: cancelByTimeout fails without arbiter', async () => {
             AMOUNT,
             1n,
             '0x0000000000000000000000000000000000000000', // No arbiter
+            0n,
             'No Arbiter Escrow',
             'QmNoArbiter',
             sellerSig,
@@ -1969,6 +1978,7 @@ test('Scenario 7B: cancelByTimeout fails without requesting cancel first', async
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'No Request Escrow',
             'QmNoRequest',
             sellerSig,
@@ -2051,6 +2061,7 @@ test('Scenario 8: Direct confirmDelivery (non-gasless)', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Direct Confirm Escrow',
             'QmDirectConfirm',
             sellerWalletSig,
@@ -2131,6 +2142,7 @@ test('Security: Signature/nonce replay protection', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Replay Test',
             'QmReplay',
             sellerWalletSig,
@@ -2205,6 +2217,7 @@ test('Security: Signature/nonce replay protection', async () => {
             AMOUNT,
             1n,
             arbiter.address,
+            0n,
             'Replay Test 2',
             'QmReplay2',
             sellerSig2,
@@ -2288,7 +2301,7 @@ test('Scenario 10: Minimum 1 day maturity requirement', async () => {
                 buyer.address,
                 AMOUNT,
                 0n, // 0 maturity days - should fail
-                arbiter.address,
+                arbiter.address, 0n,
                 'Zero Maturity Escrow',
                 'QmZeroMaturity',
                 sellerWalletSig,
@@ -2314,7 +2327,7 @@ test('Scenario 10: Minimum 1 day maturity requirement', async () => {
             buyer.address,
             AMOUNT,
             1n, // 1 day maturity
-            arbiter.address,
+            arbiter.address, 0n,
             'One Day Maturity Escrow',
             'QmOneDayMaturity',
             sellerWalletSig,

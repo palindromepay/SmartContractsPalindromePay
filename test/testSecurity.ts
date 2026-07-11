@@ -351,7 +351,7 @@ async function createAndDepositEscrow(): Promise<{ escrowId: number; deal: any }
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Security Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Security Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -373,6 +373,7 @@ const setArbiterTypes = {
     SetArbiter: [
         { name: 'escrowId', type: 'uint256' },
         { name: 'newArbiter', type: 'address' },
+        { name: 'arbiterFeeBps', type: 'uint16' },
         { name: 'deadline', type: 'uint256' },
         { name: 'nonce', type: 'uint256' },
     ],
@@ -385,13 +386,14 @@ async function signSetArbiter(
     newArbiter: Address,
     deadline: bigint,
     nonce: bigint,
+    arbiterFeeBps: number = 0,
 ) {
     return signerClient.signTypedData({
         account: signerAddress,
         domain: getEscrowDomain(),
         types: setArbiterTypes,
         primaryType: 'SetArbiter',
-        message: { escrowId: BigInt(escrowId), newArbiter, deadline, nonce },
+        message: { escrowId: BigInt(escrowId), newArbiter, arbiterFeeBps, deadline, nonce },
     });
 }
 
@@ -405,7 +407,7 @@ async function createArbiterlessDeposited(): Promise<{ escrowId: number; deal: a
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 30n, ZERO_ADDR, 'No Arbiter', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 30n, ZERO_ADDR, 0n, 'No Arbiter', 'QmTest', sellerSig],
     });
     const deal = await getDeal(escrowId);
     const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
@@ -656,7 +658,7 @@ test('SECURITY: Access Control - Only buyer can deposit', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Access Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Access Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -810,7 +812,7 @@ test('SECURITY: State Manipulation - Cannot confirm in wrong state', async () =>
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'State Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'State Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -846,7 +848,7 @@ test('SECURITY: State Manipulation - Cannot dispute in wrong state', async () =>
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'State Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'State Test', 'QmTest', sellerSig],
     });
 
     // Try to start dispute before deposit
@@ -949,6 +951,7 @@ test('SECURITY: DoS - Cannot block escrow creation with zero arbiter', async () 
                 AMOUNT,
                 1n,
                 '0x0000000000000000000000000000000000000000' as Address, // zero arbiter
+                0n,
                 'DoS Test',
                 'QmTest',
                 sellerSig
@@ -1075,7 +1078,7 @@ test('SECURITY: Integer Overflow - Solidity 0.8+ automatic checks', async () => 
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, maxAmount, 1n, arbiter.address, 'Overflow Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, maxAmount, 1n, arbiter.address, 0n, 'Overflow Test', 'QmTest', sellerSig],
         });
         // May fail for various reasons (amount too large, token checks, etc.)
     } catch (error: any) {
@@ -1314,7 +1317,7 @@ test('SECURITY: Validation - Amount minimum check', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, 1n, 1n, arbiter.address, 'Min Amount Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, 1n, 1n, arbiter.address, 0n, 'Min Amount Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - amount too small');
     } catch (error: any) {
@@ -1338,7 +1341,7 @@ test('SECURITY: Validation - Maturity time limit', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 3651n, arbiter.address, 'Maturity Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 3651n, arbiter.address, 0n, 'Maturity Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - maturity too long');
     } catch (error: any) {
@@ -1362,7 +1365,7 @@ test('SECURITY: Validation - Buyer cannot be seller', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Same Party Test', 'QmTest', sellerSig],
+            args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 0n, 'Same Party Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - buyer equals seller');
     } catch (error: any) {
@@ -1386,7 +1389,7 @@ test('SECURITY: Validation - Arbiter cannot be buyer or seller', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, seller.address, 'Arbiter Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, seller.address, 0n, 'Arbiter Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - arbiter equals seller');
     } catch (error: any) {
@@ -1400,7 +1403,7 @@ test('SECURITY: Validation - Arbiter cannot be buyer or seller', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, buyer.address, 'Arbiter Test', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, buyer.address, 0n, 'Arbiter Test', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - arbiter equals buyer');
     } catch (error: any) {
@@ -1424,7 +1427,7 @@ test('SECURITY: Validation - Arbiter cannot be fee receiver', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 'Fee Receiver Arbiter', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, owner.address, 0n, 'Fee Receiver Arbiter', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted - arbiter equals fee receiver');
     } catch (error: any) {
@@ -1444,7 +1447,7 @@ test('SECURITY: Validation - Arbiter cannot be fee receiver', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrowAndDeposit',
-            args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 'Fee Receiver Arbiter', 'QmTest', buyerSig],
+            args: [tokenAddress, seller.address, AMOUNT, 1n, owner.address, 0n, 'Fee Receiver Arbiter', 'QmTest', buyerSig],
         });
         assert.fail('Should have reverted - arbiter equals fee receiver');
     } catch (error: any) {
@@ -1476,7 +1479,7 @@ test('SECURITY: setArbiter - both parties agree, unlocks dispute', async () => {
 
     await buyerClient.writeContract({
         address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-        args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+        args: [BigInt(escrowId), arbiter.address, 0n, bSig, sSig, deadline, 0n],
     });
 
     const deal = await getDeal(escrowId);
@@ -1500,7 +1503,7 @@ test('SECURITY: setArbiter - single-party consent is rejected', async () => {
     await assert.rejects(
         buyerClient.writeContract({
             address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-            args: [BigInt(escrowId), arbiter.address, bSig, bSig, deadline, 0n],
+            args: [BigInt(escrowId), arbiter.address, 0n, bSig, bSig, deadline, 0n],
         }),
         (e: any) => /Bad seller sig|revert/.test(e.message),
     );
@@ -1517,7 +1520,7 @@ test('SECURITY: setArbiter - rejects buyer/seller/fee-receiver as arbiter', asyn
         const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, bad, deadline, 0n);
         await assert.rejects(buyerClient.writeContract({
             address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-            args: [BigInt(escrowId), bad, bSig, sSig, deadline, 0n],
+            args: [BigInt(escrowId), bad, 0n, bSig, sSig, deadline, 0n],
         }));
     }
     console.log('   ✅ Buyer/seller cannot be installed as arbiter');
@@ -1533,7 +1536,7 @@ test('SECURITY: setArbiter - cannot set twice (replay) and rejects expired deadl
     const sExp = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, past, 0n);
     await assert.rejects(buyerClient.writeContract({
         address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-        args: [BigInt(escrowId), arbiter.address, bExp, sExp, past, 0n],
+        args: [BigInt(escrowId), arbiter.address, 0n, bExp, sExp, past, 0n],
     }));
 
     // Valid set
@@ -1542,18 +1545,128 @@ test('SECURITY: setArbiter - cannot set twice (replay) and rejects expired deadl
     const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, deadline, 0n);
     await buyerClient.writeContract({
         address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-        args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+        args: [BigInt(escrowId), arbiter.address, 0n, bSig, sSig, deadline, 0n],
     });
 
     // Replay with same sigs rejected (arbiter already set)
     await assert.rejects(
         buyerClient.writeContract({
             address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
-            args: [BigInt(escrowId), arbiter.address, bSig, sSig, deadline, 0n],
+            args: [BigInt(escrowId), arbiter.address, 0n, bSig, sSig, deadline, 0n],
         }),
         (e: any) => /Arbiter already set|revert/.test(e.message),
     );
     console.log('   ✅ One-shot set; expired deadline and replay both rejected');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ARBITER FEE — Phase F
+// ════════════════════════════════════════════════════════════════════════════
+
+const tokenBalance = async (addr: Address): Promise<bigint> =>
+    (await publicClient.readContract({
+        address: tokenAddress, abi: tokenAbi, functionName: 'balanceOf', args: [addr],
+    })) as bigint;
+
+// Funded escrow with an arbiter fee; returns ids/wallet.
+async function createFundedWithFee(feeBps: number): Promise<{ escrowId: number; wallet: Address }> {
+    await fundAndApprove(buyerClient, buyer.address);
+    const escrowId = await getNextEscrowId();
+    const predictedWallet = computePredictedWallet(escrowId);
+    const sellerSig = await signWalletAuthorization(sellerClient, seller.address, predictedWallet, escrowId);
+    await sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'createEscrow',
+        args: [tokenAddress, buyer.address, AMOUNT, 30n, arbiter.address, feeBps, 'Fee Test', 'QmTest', sellerSig],
+    });
+    const deal = await getDeal(escrowId);
+    const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'deposit',
+        args: [BigInt(escrowId), buyerSig],
+    });
+    return { escrowId, wallet: deal.wallet };
+}
+
+test('SECURITY: arbiter fee - paid on dispute (both directions), not on happy path', async () => {
+    console.log('\n🔒 ARBITER FEE TEST: distribution');
+    const FEE = 500; // 5%
+    const fee = (AMOUNT * 500n) / 10_000n;
+    const platform = (AMOUNT * 100n) / 10_000n;
+
+    // COMPLETE by arbiter → seller = amount - platform - arbiterFee, arbiter = fee
+    {
+        const { escrowId, wallet } = await createFundedWithFee(FEE);
+        await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [BigInt(escrowId)] });
+        await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [BigInt(escrowId), Role.Buyer, 'Qm'] });
+        await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [BigInt(escrowId), Role.Seller, 'Qm'] });
+        const arbSig = await signWalletAuthorization(arbiterClient, arbiter.address, wallet, escrowId, State.COMPLETE);
+        await arbiterClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [BigInt(escrowId), State.COMPLETE, 'Qm', arbSig] });
+        const s0 = await tokenBalance(seller.address), a0 = await tokenBalance(arbiter.address);
+        await buyerClient.writeContract({ address: wallet, abi: walletAbi, functionName: 'withdraw', args: [] });
+        assert.equal((await tokenBalance(arbiter.address)) - a0, fee, 'arbiter gets 5%');
+        assert.equal((await tokenBalance(seller.address)) - s0, AMOUNT - platform - fee, 'seller gets rest');
+    }
+    // REFUNDED by arbiter → buyer = amount - arbiterFee, arbiter = fee (no platform fee)
+    {
+        const { escrowId, wallet } = await createFundedWithFee(FEE);
+        await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'startDispute', args: [BigInt(escrowId)] });
+        await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [BigInt(escrowId), Role.Buyer, 'Qm'] });
+        await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitDisputeMessage', args: [BigInt(escrowId), Role.Seller, 'Qm'] });
+        const arbSig = await signWalletAuthorization(arbiterClient, arbiter.address, wallet, escrowId, State.REFUNDED);
+        await arbiterClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'submitArbiterDecision', args: [BigInt(escrowId), State.REFUNDED, 'Qm', arbSig] });
+        const b0 = await tokenBalance(buyer.address), a0 = await tokenBalance(arbiter.address);
+        await buyerClient.writeContract({ address: wallet, abi: walletAbi, functionName: 'withdraw', args: [] });
+        assert.equal((await tokenBalance(arbiter.address)) - a0, fee, 'arbiter gets 5%');
+        assert.equal((await tokenBalance(buyer.address)) - b0, AMOUNT - fee, 'buyer gets rest');
+    }
+    // Happy path (no dispute) → arbiter gets nothing
+    {
+        const { escrowId, wallet } = await createFundedWithFee(FEE);
+        const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, wallet, escrowId, State.COMPLETE);
+        await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'confirmDelivery', args: [BigInt(escrowId), buyerSig] });
+        const a0 = await tokenBalance(arbiter.address);
+        await buyerClient.writeContract({ address: wallet, abi: walletAbi, functionName: 'withdraw', args: [] });
+        assert.equal((await tokenBalance(arbiter.address)) - a0, 0n, 'no arbiter fee without a ruling');
+    }
+    console.log('   ✅ Arbiter fee only on rulings, both directions, zero on happy path');
+});
+
+test('SECURITY: arbiter fee - validation (cap + needs arbiter)', async () => {
+    console.log('\n🔒 ARBITER FEE TEST: validation');
+    await fundAndApprove(buyerClient, buyer.address);
+    const escrowId = await getNextEscrowId();
+    const predictedWallet = computePredictedWallet(escrowId);
+    const sellerSig = await signWalletAuthorization(sellerClient, seller.address, predictedWallet, escrowId);
+
+    // Fee over the 20% cap
+    await assert.rejects(sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'createEscrow',
+        args: [tokenAddress, buyer.address, AMOUNT, 30n, arbiter.address, 2001, 'X', 'Qm', sellerSig],
+    }), (e: any) => /Arbiter fee too high|revert/.test(e.message));
+
+    // Fee without an arbiter
+    await assert.rejects(sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'createEscrow',
+        args: [tokenAddress, buyer.address, AMOUNT, 30n, ZERO_ADDR, 100, 'X', 'Qm', sellerSig],
+    }), (e: any) => /Fee needs arbiter|revert/.test(e.message));
+    console.log('   ✅ Fee cap and "needs arbiter" enforced');
+});
+
+test('SECURITY: setArbiter - both signatures must cover the same fee', async () => {
+    console.log('\n🔒 ARBITER FEE TEST: fee is part of mutual consent');
+    const { escrowId } = await createArbiterlessDeposited();
+    const deadline = (await getBlockTimestamp()) + 3600n;
+    // Buyer signs fee=500, seller signs fee=0 → mismatch, seller sig invalid for the submitted fee
+    const bSig = await signSetArbiter(buyerClient, buyer.address, escrowId, arbiter.address, deadline, 0n, 500);
+    const sSig = await signSetArbiter(sellerClient, seller.address, escrowId, arbiter.address, deadline, 0n, 0);
+    await assert.rejects(
+        buyerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'setArbiterSigned',
+            args: [BigInt(escrowId), arbiter.address, 500, bSig, sSig, deadline, 0n],
+        }),
+        (e: any) => /Bad seller sig|revert/.test(e.message),
+    );
+    console.log('   ✅ Diverging fee signatures rejected');
 });
 
 test('Security Test Summary', async () => {

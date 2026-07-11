@@ -53,6 +53,9 @@ contract PalindromePay is ReentrancyGuard {
     /// @dev Basis points denominator (100% = 10,000 bps)
     uint256 private constant BPS_DENOMINATOR = 10_000;
 
+    /// @notice Maximum arbiter fee in basis points (20%)
+    uint256 public constant MAX_ARBITER_FEE_BPS = 2_000;
+
     /// @dev Maximum length for title and IPFS hash strings
     uint256 private constant MAX_STRING_LENGTH = 500;
 
@@ -83,6 +86,7 @@ contract PalindromePay is ReentrancyGuard {
         bool buyerCancelRequested;  // Buyer has requested cancellation
         bool sellerCancelRequested; // Seller has requested cancellation
         uint8 tokenDecimals;        // Token decimals (cached for fee calc)
+        uint16 arbiterFeeBps;       // Arbiter fee in bps, paid only if arbiter resolves a dispute
         bytes sellerWalletSig;      // Seller's wallet authorization signature
         bytes buyerWalletSig;       // Buyer's wallet authorization signature
         bytes arbiterWalletSig;     // Arbiter's wallet authorization signature
@@ -687,7 +691,7 @@ contract PalindromePay is ReentrancyGuard {
 
     /// @dev Type hash for setArbiterSigned (both buyer and seller sign this)
     bytes32 private constant SET_ARBITER_TYPEHASH = keccak256(
-        "SetArbiter(uint256 escrowId,address newArbiter,uint256 deadline,uint256 nonce)"
+        "SetArbiter(uint256 escrowId,address newArbiter,uint16 arbiterFeeBps,uint256 deadline,uint256 nonce)"
     );
 
     /// @dev Returns domain separator, recomputing if chain ID changed (fork)
@@ -727,6 +731,14 @@ contract PalindromePay is ReentrancyGuard {
         returns (uint256)
     {
         return 10 * (10 ** decimals);
+    }
+
+    /// @dev Validates an arbiter fee: capped, and only allowed if an arbiter exists
+    /// @param arbiter The arbiter address (address(0) means none)
+    /// @param arbiterFeeBps The proposed arbiter fee in basis points
+    function _validateArbiterFee(address arbiter, uint16 arbiterFeeBps) internal pure {
+        require(arbiterFeeBps <= MAX_ARBITER_FEE_BPS, "Arbiter fee too high");
+        require(arbiter != address(0) || arbiterFeeBps == 0, "Fee needs arbiter");
     }
 
     /// @dev Calculates fee and net amount for payouts
@@ -840,6 +852,7 @@ contract PalindromePay is ReentrancyGuard {
         uint256 amount,
         uint256 maturityTimeDays,
         address arbiter,
+        uint16 arbiterFeeBps,
         string calldata title,
         string calldata ipfsHash,
         bytes calldata sellerWalletSig
@@ -859,6 +872,7 @@ contract PalindromePay is ReentrancyGuard {
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
         require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
         require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
+        _validateArbiterFee(arbiter, arbiterFeeBps);
 
         uint256 escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -876,6 +890,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.buyer = buyer;
         deal.seller = msg.sender;
         deal.arbiter = arbiter;
+        deal.arbiterFeeBps = arbiterFeeBps;
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
@@ -921,6 +936,7 @@ contract PalindromePay is ReentrancyGuard {
         uint256 amount,
         uint256 maturityTimeDays,
         address arbiter,
+        uint16 arbiterFeeBps,
         string calldata title,
         string calldata ipfsHash,
         bytes calldata buyerWalletSig
@@ -940,6 +956,7 @@ contract PalindromePay is ReentrancyGuard {
         require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
         require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
         require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
+        _validateArbiterFee(arbiter, arbiterFeeBps);
 
         escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -958,6 +975,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.buyer = msg.sender;
         deal.seller = seller;
         deal.arbiter = arbiter;
+        deal.arbiterFeeBps = arbiterFeeBps;
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
@@ -1277,6 +1295,7 @@ contract PalindromePay is ReentrancyGuard {
      *      here.
      * @param escrowId The escrow ID
      * @param newArbiter The agreed arbiter address (must be an EOA)
+     * @param arbiterFeeBps The agreed arbiter fee in bps (both parties sign it)
      * @param buyerSig Buyer's EIP-712 signature over the SetArbiter struct
      * @param sellerSig Seller's EIP-712 signature over the SetArbiter struct
      * @param deadline Signature deadline (max 1 day out)
@@ -1285,6 +1304,7 @@ contract PalindromePay is ReentrancyGuard {
     function setArbiterSigned(
         uint256 escrowId,
         address newArbiter,
+        uint16 arbiterFeeBps,
         bytes calldata buyerSig,
         bytes calldata sellerSig,
         uint256 deadline,
@@ -1311,13 +1331,14 @@ contract PalindromePay is ReentrancyGuard {
         );
         require(newArbiter.code.length == 0, "Arbiter must be EOA");
         require(newArbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
+        _validateArbiterFee(newArbiter, arbiterFeeBps);
 
-        // Verify both parties signed this exact (escrow, arbiter, deadline, nonce).
+        // Verify both parties signed this exact (escrow, arbiter, fee, deadline, nonce).
         _validateSignatureFormat(buyerSig);
         _validateSignatureFormat(sellerSig);
 
         bytes32 structHash = keccak256(
-            abi.encode(SET_ARBITER_TYPEHASH, escrowId, newArbiter, deadline, nonce)
+            abi.encode(SET_ARBITER_TYPEHASH, escrowId, newArbiter, arbiterFeeBps, deadline, nonce)
         );
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
@@ -1330,6 +1351,7 @@ contract PalindromePay is ReentrancyGuard {
         _useNonce(escrowId, deal.seller, nonce);
 
         deal.arbiter = newArbiter;
+        deal.arbiterFeeBps = arbiterFeeBps;
         emit ArbiterSet(escrowId, newArbiter);
     }
 

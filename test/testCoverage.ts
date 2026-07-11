@@ -278,7 +278,7 @@ test('DIRECT: confirmDelivery (non-signed version)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Direct Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Direct Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -317,7 +317,7 @@ test('DIRECT: startDispute (non-signed version)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Dispute Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Dispute Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -355,7 +355,7 @@ test('DIRECT: Seller starts dispute', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Seller Dispute', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Seller Dispute', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -397,7 +397,7 @@ test('VIEW: getWalletAuthorizationDigest', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'View Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'View Test', 'QmTest', sellerSig],
     });
 
     // Test the view function
@@ -425,7 +425,7 @@ test('VIEW: Wallet getBalance', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Balance Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Balance Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -473,7 +473,7 @@ test('VIEW: Wallet isSignatureValid', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Sig Valid Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Sig Valid Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -513,7 +513,7 @@ test('VIEW: Wallet getAuthorizationDigest', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Auth Digest Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Auth Digest Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -548,7 +548,7 @@ test('EDGE: Maximum length title (100 chars)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, maxTitle, 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, maxTitle, 'QmTest', sellerSig],
     });
 
     console.log('   ✅ 100-char title accepted\n');
@@ -569,7 +569,7 @@ test('EDGE: Over-length title (101 chars) rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, overTitle, 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, overTitle, 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -592,7 +592,7 @@ test('EDGE: Empty title rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, '', 'QmTest', sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, '', 'QmTest', sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -615,7 +615,7 @@ test('EDGE: Maximum length IPFS hash (100 chars)', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Hash Test', maxHash, sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Hash Test', maxHash, sellerSig],
     });
 
     console.log('   ✅ 100-char IPFS hash accepted\n');
@@ -636,7 +636,7 @@ test('EDGE: Over-length IPFS hash (101 chars) rejected', async () => {
             address: escrowAddress,
             abi: escrowAbi,
             functionName: 'createEscrow',
-            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Hash Test', overHash, sellerSig],
+            args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Hash Test', overHash, sellerSig],
         });
         assert.fail('Should have reverted');
     } catch (error: any) {
@@ -665,6 +665,7 @@ test('EDGE: Zero arbiter - escrow creation succeeds but dispute fails', async ()
             AMOUNT,
             1n,
             '0x0000000000000000000000000000000000000000' as Address,
+            0n,
             'Zero Arbiter',
             'QmTest',
             sellerSig
@@ -709,7 +710,7 @@ test('EDGE: acceptEscrow - cannot accept twice', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrowAndDeposit',
-        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Accept Test', 'QmTest', buyerSig],
+        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 0n, 'Accept Test', 'QmTest', buyerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -750,7 +751,7 @@ test('EDGE: acceptEscrow - wrong caller rejected', async () => {
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrowAndDeposit',
-        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 'Accept Caller Test', 'QmTest', buyerSig],
+        args: [tokenAddress, seller.address, AMOUNT, 1n, arbiter.address, 0n, 'Accept Caller Test', 'QmTest', buyerSig],
     });
 
     const deal = await getDeal(escrowId);
@@ -786,7 +787,7 @@ test('EDGE: Arbiter can decide after 30-day timeout with partial evidence', asyn
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 'Timeout Test', 'QmTest', sellerSig],
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0n, 'Timeout Test', 'QmTest', sellerSig],
     });
 
     const deal = await getDeal(escrowId);

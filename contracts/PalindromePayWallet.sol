@@ -31,6 +31,7 @@ interface IPalindromePay {
         bool buyerCancelRequested;
         bool sellerCancelRequested;
         uint8 tokenDecimals;
+        uint16 arbiterFeeBps;
         bytes sellerWalletSig;
         bytes buyerWalletSig;
         bytes arbiterWalletSig;
@@ -166,6 +167,16 @@ contract PalindromePayWallet is ReentrancyGuard {
         uint256 netAmount,
         address indexed feeReceiver,
         uint256 feeAmount
+    );
+
+    /// @notice Emitted when the arbiter is paid a fee for resolving a dispute
+    /// @param escrowId The escrow ID
+    /// @param arbiter The arbiter receiving the fee
+    /// @param amount The arbiter fee amount
+    event ArbiterPaid(
+        uint256 indexed escrowId,
+        address indexed arbiter,
+        uint256 amount
     );
 
     // ---------------------------------------------------------------------
@@ -409,18 +420,37 @@ contract PalindromePayWallet is ReentrancyGuard {
         IERC20 token = IERC20(deal.token);
         uint256 balance = token.balanceOf(address(this));
 
+        // The arbiter earns their fee only if they actually resolved the dispute,
+        // i.e. their outcome-bound signature for THIS terminal state is present.
+        // Timeout/happy-path settlements carry no arbiter signature, so no fee.
+        uint256 arbiterFee = 0;
+        if (
+            deal.arbiterFeeBps > 0 &&
+            _isValidSignature(deal.arbiterWalletSig, deal.arbiter, uint8(state))
+        ) {
+            arbiterFee = (balance * deal.arbiterFeeBps) / BPS_DENOMINATOR;
+            if (arbiterFee > 0) {
+                token.safeTransfer(deal.arbiter, arbiterFee);
+                emit ArbiterPaid(ESCROW_ID, deal.arbiter, arbiterFee);
+            }
+        }
+
         address recipient;
         uint256 netAmount;
         uint256 feeAmount;
 
         if (state == IPalindromePay.State.COMPLETE) {
-            // Seller receives payment minus fee
+            // Seller receives payment minus platform fee and arbiter fee
             recipient = deal.seller;
 
             address feeTo = escrow.FEE_RECEIVER();
             if (feeTo == address(0)) revert FeeReceiverZero();
 
-            (netAmount, feeAmount) = _computeFeeAndNet(balance, deal.tokenDecimals);
+            (, feeAmount) = _computeFeeAndNet(balance, deal.tokenDecimals);
+
+            // Platform fee + arbiter fee must leave something for the seller
+            if (feeAmount + arbiterFee >= balance) revert AmountTooSmallForFee();
+            netAmount = balance - feeAmount - arbiterFee;
 
             // Transfer fee to fee receiver
             if (feeAmount > 0) {
@@ -432,9 +462,9 @@ contract PalindromePayWallet is ReentrancyGuard {
 
             emit Withdrawn(ESCROW_ID, recipient, netAmount, feeTo, feeAmount);
         } else {
-            // Buyer receives full refund (REFUNDED or CANCELED)
+            // Buyer receives refund minus arbiter fee (REFUNDED or CANCELED)
             recipient = deal.buyer;
-            netAmount = balance;
+            netAmount = balance - arbiterFee; // arbiterFee <= balance (bps <= 20%)
             feeAmount = 0;
 
             token.safeTransfer(recipient, netAmount);
