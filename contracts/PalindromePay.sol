@@ -1743,20 +1743,4 @@ contract PalindromePay is ReentrancyGuard {
         return _domainSeparator();
     }
 
-    // -----------------------------------------------------------------
-    // Token Recovery
-    // -----------------------------------------------------------------
-
-    /**
-     * @notice Recovers ERC-20 tokens accidentally sent to this contract
-     * @dev Only callable by FEE_RECEIVER. Cannot recover native ETH.
-     * @param token The ERC-20 token address to recover
-     * @param to The recipient address
-     * @param amount The amount to recover
-     */
-    function recoverToken(address token, address to, uint256 amount) external {
-        require(msg.sender == FEE_RECEIVER, "Only fee receiver");
-        require(to != address(0), "Zero address");
-        IERC20(token).safeTransfer(to, amount);
-    }
 }
