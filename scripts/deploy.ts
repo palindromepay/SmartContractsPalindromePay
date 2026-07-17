@@ -23,6 +23,9 @@
  *   # Deploy with Trezor hardware wallet (via Frame)
  *   npx ts-node scripts/deploy.ts eth --trezor
  *
+ *   # Skip the interactive confirmation prompt (CI / non-interactive)
+ *   npx ts-node scripts/deploy.ts base-test --yes
+ *
  *   # Verify already-deployed contracts (no deployment)
  *   npx ts-node scripts/deploy.ts base --verify-only --factory 0x123... --escrow 0x456...
  *
@@ -40,7 +43,7 @@
  *
  * Required Environment Variables:
  *   OWNER_KEY            - Deployer private key (not needed for local or --trezor)
- *   FREE_RECEIVER        - Fee receiver address (not needed for local)
+ *   FREE_RECEIVER        - Fee receiver address (not needed for local; FEE_RECEIVER also accepted)
  *   ETH_SEPOLIA_RPC_URL  - Ethereum Sepolia RPC URL
  *   ETH_RPC_URL          - Ethereum Mainnet RPC URL
  *   BSCTESTNET_RPC_URL   - BSC Testnet RPC URL
@@ -52,6 +55,7 @@
  * Hardware Wallet (Trezor):
  *   Requires Frame wallet (https://frame.sh) running with Trezor connected.
  *   Frame exposes a local RPC at http://127.0.0.1:1248
+ *   Frame's active chain must match the target network; the script aborts on mismatch.
  */
 
 import * as dotenv from "dotenv";
@@ -61,6 +65,8 @@ import {
     createPublicClient,
     createWalletClient,
     http,
+    formatEther,
+    encodeDeployData,
     type PublicClient,
     type WalletClient,
     type Chain,
@@ -70,8 +76,9 @@ import {
 } from "viem";
 import { bscTestnet, baseSepolia, bsc, base, hardhat, sepolia, mainnet } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { execSync } from "child_process";
+import { createInterface } from "node:readline/promises";
 
 // =============================================================================
 // Configuration
@@ -82,6 +89,10 @@ const LOCAL_DEPLOYER_KEY = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3f
 
 // Frame wallet RPC (for Trezor/Ledger hardware wallets)
 const FRAME_RPC_URL = "http://127.0.0.1:1248";
+
+// Receipt confirmations to wait for before verification (Etherscan indexing lag)
+const MAINNET_CONFIRMATIONS = 5;
+const TESTNET_CONFIRMATIONS = 2;
 
 // Test USDT constructor args (shared by deployment and --verify-only)
 const USDT_INITIAL_SUPPLY = 10_000_000n * 10n ** 6n; // 10M with 6 decimals
@@ -203,7 +214,8 @@ Options:
   --usdt-only    - Deploy only USDT (skip PalindromePay)
   --no-verify    - Skip contract verification
   --with-usdt    - Deploy test USDT token (default for testnets/local)
-  --trezor       - Use Trezor via Frame wallet (requires Frame running)
+  --trezor       - Use Trezor via Frame wallet (requires Frame running on the target chain)
+  --yes, -y      - Skip the interactive confirmation prompt
   --verify-only  - Only verify contracts (skip deployment)
   --factory <addr> - Factory address (for --verify-only)
   --escrow <addr>  - Escrow address (for --verify-only; requires --factory)
@@ -236,6 +248,64 @@ function buildVerifyOnlyCommand(
     return `npx ts-node scripts/deploy.ts ${networkName} --verify-only ${flags}`;
 }
 
+interface DeployResult {
+    address: Hex;
+    blockNumber: bigint;
+    txHash: Hex;
+}
+
+function gitCommitHash(): string {
+    try {
+        return execSync("git rev-parse HEAD").toString().trim();
+    } catch {
+        return "unknown";
+    }
+}
+
+/**
+ * Writes deployments/<network>.json. An existing record is backed up to a
+ * timestamped file first so a prior deployment record is never clobbered.
+ */
+function writeDeploymentRecord(networkName: string, record: object): string {
+    const dir = "deployments";
+    mkdirSync(dir, { recursive: true });
+    const path = `${dir}/${networkName}.json`;
+    if (existsSync(path)) {
+        writeFileSync(`${dir}/${networkName}.${Date.now()}.json`, readFileSync(path));
+    }
+    const json = JSON.stringify(record, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2);
+    writeFileSync(path, json + "\n");
+    return path;
+}
+
+async function confirmOrAbort(autoYes: boolean): Promise<void> {
+    if (autoYes) return;
+    if (!process.stdin.isTTY) {
+        throw new Error("Non-interactive session: pass --yes to skip the confirmation prompt.");
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = (await rl.question("Proceed with deployment? (yes/no): ")).trim().toLowerCase();
+    rl.close();
+    if (answer !== "yes" && answer !== "y") {
+        throw new Error("Aborted by user.");
+    }
+}
+
+async function estimateDeployCost(
+    publicClient: PublicClient,
+    deployer: Hex,
+    deployments: Array<{ abi: any; bytecode: Hex; args: any[] }>
+): Promise<{ totalGas: bigint; estimatedCost: bigint }> {
+    let totalGas = 0n;
+    for (const d of deployments) {
+        const data = encodeDeployData({ abi: d.abi, bytecode: d.bytecode, args: d.args });
+        totalGas += await publicClient.estimateGas({ account: deployer, data });
+    }
+    const fees = await publicClient.estimateFeesPerGas();
+    const gasPrice = fees.maxFeePerGas ?? (await publicClient.getGasPrice());
+    return { totalGas, estimatedCost: totalGas * gasPrice };
+}
+
 // =============================================================================
 // Deploy Functions
 // =============================================================================
@@ -244,8 +314,9 @@ async function deployContract(
     publicClient: PublicClient,
     walletClient: WalletClient,
     chain: Chain,
-    { abi, bytecode, args = [] }: { abi: any; bytecode: Hex; args?: any[] }
-): Promise<{ address: Hex; blockNumber: bigint; txHash: Hex }> {
+    { abi, bytecode, args = [] }: { abi: any; bytecode: Hex; args?: any[] },
+    confirmations: number = 1
+): Promise<DeployResult> {
     console.log("  Deploying contract...");
 
     const account = walletClient.account;
@@ -264,7 +335,7 @@ async function deployContract(
     console.log(`  Transaction hash: ${hash}`);
     console.log("  Waiting for confirmation...");
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations, timeout: 300_000 });
 
     if (!receipt.contractAddress) {
         throw new Error("Deployment failed: No contract address in receipt");
@@ -348,6 +419,7 @@ async function main() {
     const withUsdt = args.includes("--with-usdt");
     const useTrezor = args.includes("--trezor");
     const verifyOnly = args.includes("--verify-only");
+    const autoYes = args.includes("--yes") || args.includes("-y");
 
     // Validate network
     const network = NETWORKS[networkName];
@@ -385,7 +457,7 @@ async function main() {
 
         // Only the escrow verification needs the fee receiver constructor arg
         const feeReceiver = escrowAddr
-            ? validateAddress(process.env.FREE_RECEIVER, "FREE_RECEIVER")
+            ? validateAddress(process.env.FREE_RECEIVER ?? process.env.FEE_RECEIVER, "FREE_RECEIVER (or FEE_RECEIVER)")
             : undefined;
 
         console.log("========================================");
@@ -463,9 +535,16 @@ async function main() {
     const PalindromePayArtifact = loadArtifact(
         "./artifacts/contracts/PalindromePay.sol/PalindromePay.json"
     );
+    const FactoryArtifact = loadArtifact(
+        "./artifacts/contracts/PalindromePayWalletFactory.sol/PalindromePayWalletFactory.json"
+    );
     const USDTArtifact = loadArtifact(
         "./artifacts/contracts/USDT.sol/USDT.json"
     );
+
+    // Confirmations before proceeding past each deploy tx (mainnet waits longer
+    // so Etherscan has indexed the contracts before verification)
+    const confirmations = network.isLocal ? 1 : isTestnet ? TESTNET_CONFIRMATIONS : MAINNET_CONFIRMATIONS;
 
     let deployerAddress: Hex;
     let walletClient: WalletClient<Transport, Chain, Account | undefined>;
@@ -476,22 +555,45 @@ async function main() {
         console.log(`${colors.yellow}Connecting to Frame wallet...${colors.reset}`);
         console.log(`Make sure Frame is running with Trezor connected.\n`);
 
-        // Create Frame transport
-        const frameTransport = http(FRAME_RPC_URL, { timeout: 600_000 });
+        // Create Frame transport. retryCount 0: a retried request on a signing
+        // transport re-prompts the Trezor, and connection failures should fail fast.
+        const frameTransport = http(FRAME_RPC_URL, { timeout: 600_000, retryCount: 0 });
 
-        // Get accounts from Frame
         const tempClient = createWalletClient({
             chain: network.chain,
             transport: frameTransport,
         });
 
+        // Fail fast if Frame is unreachable, and refuse to sign on the wrong chain
+        let frameChainId: number;
+        try {
+            const chainIdHex = await tempClient.request({ method: "eth_chainId" });
+            frameChainId = Number(chainIdHex);
+        } catch (err: any) {
+            const message = `${err?.message ?? ""} ${err?.cause?.message ?? ""}`;
+            if (err?.cause?.code === "ECONNREFUSED" || /ECONNREFUSED|fetch failed|HTTP request failed/i.test(message)) {
+                throw new Error(
+                    `Cannot reach Frame at ${FRAME_RPC_URL}. Start the Frame app (https://frame.sh), ` +
+                    `connect and unlock your Trezor, then re-run.`
+                );
+            }
+            throw err;
+        }
+        if (frameChainId !== network.chain.id) {
+            throw new Error(
+                `Frame's active chain is ${frameChainId}, but the target is ${network.chain.name} (${network.chain.id}). ` +
+                `In Frame, click the chain badge on the deployer account, select the target chain, then re-run.`
+            );
+        }
+
+        // Get accounts from Frame
         const accounts = await tempClient.getAddresses();
         if (accounts.length === 0) {
             throw new Error("No accounts found in Frame. Make sure Trezor is connected and unlocked.");
         }
 
         deployerAddress = accounts[0];
-        console.log(`${colors.green}Connected to Trezor via Frame${colors.reset}`);
+        console.log(`${colors.green}Connected to Trezor via Frame (chain ${frameChainId})${colors.reset}`);
 
         // Create clients - use network RPC for reads, Frame for signing
         publicClient = createPublicClient({
@@ -526,26 +628,91 @@ async function main() {
     }
 
     // For local network, use deployer as fee receiver if not set
-    const feeReceiver = network.isLocal && !process.env.FREE_RECEIVER
+    const feeReceiverEnv = process.env.FREE_RECEIVER ?? process.env.FEE_RECEIVER;
+    const feeReceiver = network.isLocal && !feeReceiverEnv
         ? deployerAddress
-        : validateAddress(process.env.FREE_RECEIVER, "FREE_RECEIVER");
+        : validateAddress(feeReceiverEnv, "FREE_RECEIVER (or FEE_RECEIVER)");
 
     console.log(`Deployer:     ${deployerAddress}`);
     console.log(`Fee Receiver: ${feeReceiver}\n`);
 
-    // Check deployer balance
+    // Check deployer balance against the estimated total deploy cost
     const balance = await publicClient.getBalance({ address: deployerAddress });
-    const balanceFormatted = (Number(balance) / 1e18).toFixed(4);
-    console.log(`Balance:      ${balanceFormatted} ${network.chain.nativeCurrency.symbol}\n`);
+    const symbol = network.chain.nativeCurrency.symbol;
+    console.log(`Balance:      ${formatEther(balance)} ${symbol}\n`);
 
-    if (balance === 0n) {
-        throw new Error("Deployer has no balance for gas fees");
+    const plannedDeployments: Array<{ abi: any; bytecode: Hex; args: any[] }> = [];
+    if (deployUsdt) {
+        plannedDeployments.push({
+            abi: USDTArtifact.abi,
+            bytecode: USDTArtifact.bytecode as Hex,
+            args: USDT_CONSTRUCTOR_ARGS,
+        });
+    }
+    if (deployEscrow) {
+        plannedDeployments.push({
+            abi: FactoryArtifact.abi,
+            bytecode: FactoryArtifact.bytecode as Hex,
+            args: [],
+        });
+        // The real factory address doesn't exist yet; the constructor only
+        // requires a nonzero address, so the deployer works as a placeholder
+        plannedDeployments.push({
+            abi: PalindromePayArtifact.abi,
+            bytecode: PalindromePayArtifact.bytecode as Hex,
+            args: [feeReceiver, deployerAddress],
+        });
+    }
+
+    try {
+        const { totalGas, estimatedCost } = await estimateDeployCost(
+            publicClient, deployerAddress, plannedDeployments
+        );
+        const required = (estimatedCost * 120n) / 100n;
+        console.log(`Est. cost:    ~${formatEther(estimatedCost)} ${symbol} (${totalGas} gas)\n`);
+        if (balance < required) {
+            throw new Error(
+                `Insufficient balance: have ${formatEther(balance)} ${symbol}, ` +
+                `need ~${formatEther(required)} ${symbol} (estimated cost +20% buffer)`
+            );
+        }
+    } catch (err: any) {
+        if (err.message?.startsWith("Insufficient balance")) throw err;
+        console.log(`${colors.yellow}Warning: gas estimation failed (${err.shortMessage || err.message}); falling back to non-zero balance check.${colors.reset}\n`);
+        if (balance === 0n) {
+            throw new Error("Deployer has no balance for gas fees");
+        }
+    }
+
+    if (!network.isLocal) {
+        await confirmOrAbort(autoYes);
+        console.log();
     }
 
     let usdtAddress: Hex | undefined;
     let escrowAddress: Hex | undefined;
     let factoryAddress: Hex | undefined;
     let startBlock: bigint | undefined;
+    let usdtResult: DeployResult | undefined;
+    let factoryResult: DeployResult | undefined;
+    let escrowResult: DeployResult | undefined;
+
+    const buildDeploymentRecord = (status: "deployed" | "partial") => ({
+        network: networkName,
+        chainId: network.chain.id,
+        status,
+        deployer: deployerAddress,
+        feeReceiver,
+        signer: useTrezor ? "trezor" : "private-key",
+        timestamp: new Date().toISOString(),
+        gitCommit: gitCommitHash(),
+        contracts: {
+            ...(usdtResult ? { usdt: usdtResult } : {}),
+            ...(factoryResult ? { factory: factoryResult } : {}),
+            ...(escrowResult ? { escrow: escrowResult } : {}),
+        },
+        startBlock,
+    });
 
     // Collect verification tasks to run after all deployments
     const verifyTasks: Array<{
@@ -574,8 +741,10 @@ async function main() {
                     abi: USDTArtifact.abi,
                     bytecode: USDTArtifact.bytecode as Hex,
                     args: USDT_CONSTRUCTOR_ARGS,
-                }
+                },
+                confirmations
             );
+            usdtResult = usdt;
             usdtAddress = usdt.address;
             console.log(`  ${colors.green}✓ Test USDT: ${usdtAddress}${colors.reset}\n`);
 
@@ -593,9 +762,6 @@ async function main() {
         if (deployEscrow) {
             // Deploy WalletFactory first
             console.log("--- Deploying PalindromePayWalletFactory ---");
-            const FactoryArtifact = loadArtifact(
-                "./artifacts/contracts/PalindromePayWalletFactory.sol/PalindromePayWalletFactory.json"
-            );
 
             const factory = await deployContract(
                 publicClient,
@@ -605,8 +771,10 @@ async function main() {
                     abi: FactoryArtifact.abi,
                     bytecode: FactoryArtifact.bytecode as Hex,
                     args: [],
-                }
+                },
+                confirmations
             );
+            factoryResult = factory;
             factoryAddress = factory.address;
             console.log(`  ${colors.green}✓ WalletFactory: ${factoryAddress}${colors.reset}\n`);
 
@@ -631,8 +799,10 @@ async function main() {
                     abi: PalindromePayArtifact.abi,
                     bytecode: PalindromePayArtifact.bytecode as Hex,
                     args: escrowArgs,
-                }
+                },
+                confirmations
             );
+            escrowResult = escrow;
             escrowAddress = escrow.address;
             startBlock = escrow.blockNumber;
             console.log(`  ${colors.green}✓ PalindromePay: ${escrowAddress}${colors.reset}\n`);
@@ -645,13 +815,48 @@ async function main() {
                     path: "contracts/PalindromePay.sol:PalindromePay",
                 });
             }
+
+            // Read the immutables back through the network RPC: confirms the
+            // constructor args landed as intended and that the contracts exist
+            // on the target chain (not wherever the signer was pointed)
+            console.log("  Running post-deploy sanity checks...");
+            const onchainFeeReceiver = (await publicClient.readContract({
+                address: escrowAddress,
+                abi: PalindromePayArtifact.abi,
+                functionName: "FEE_RECEIVER",
+                args: [],
+            })) as Hex;
+            const onchainFactory = (await publicClient.readContract({
+                address: escrowAddress,
+                abi: PalindromePayArtifact.abi,
+                functionName: "WALLET_FACTORY",
+                args: [],
+            })) as Hex;
+            if (onchainFeeReceiver.toLowerCase() !== feeReceiver.toLowerCase()) {
+                throw new Error(`Sanity check failed: on-chain FEE_RECEIVER ${onchainFeeReceiver} != intended ${feeReceiver}`);
+            }
+            if (onchainFactory.toLowerCase() !== factoryAddress.toLowerCase()) {
+                throw new Error(`Sanity check failed: on-chain WALLET_FACTORY ${onchainFactory} != deployed factory ${factoryAddress}`);
+            }
+            console.log(`  ${colors.green}✓ On-chain FEE_RECEIVER and WALLET_FACTORY match intent${colors.reset}\n`);
         }
     } catch (err) {
+        if (!network.isLocal && (usdtResult || factoryResult || escrowResult)) {
+            const recordPath = writeDeploymentRecord(networkName, buildDeploymentRecord("partial"));
+            console.error(`\n${colors.yellow}Partial deployment record written to ${recordPath}${colors.reset}`);
+        }
         if (!shouldSkipVerify && (usdtAddress || factoryAddress || escrowAddress)) {
             console.error(`\n${colors.yellow}Deployment failed after some contracts were deployed. Verify them later with:${colors.reset}`);
             console.error(`  ${buildVerifyOnlyCommand(networkName, usdtAddress, factoryAddress, escrowAddress)}`);
         }
         throw err;
+    }
+
+    // Persist the deployment record before verification so it survives a
+    // verification failure
+    let deploymentRecordPath: string | undefined;
+    if (!network.isLocal) {
+        deploymentRecordPath = writeDeploymentRecord(networkName, buildDeploymentRecord("deployed"));
     }
 
     // =========================================================================
@@ -686,6 +891,9 @@ async function main() {
     }
     console.log(`  Network:        ${networkName}`);
     console.log(`  Chain ID:       ${network.chain.id}`);
+    if (deploymentRecordPath) {
+        console.log(`  Record:         ${deploymentRecordPath}`);
+    }
     if (network.explorerUrl && (escrowAddress || usdtAddress)) {
         console.log("----------------------------------------");
         const displayAddress = escrowAddress || usdtAddress;
