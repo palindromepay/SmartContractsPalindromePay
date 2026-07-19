@@ -164,7 +164,6 @@
     <a href="#states">02 State Diagram</a>
     <a href="#flow">03 Activity: Escrow Flow</a>
     <a href="#sequence">04 Sequence: 2-of-3 Payout</a>
-    <a href="#deploy">05 Activity: Deployment</a>
   </nav>
 </header>
 
@@ -376,39 +375,8 @@ sequenceDiagram
   <p class="footnote">In the dispute case the arbiter provides the second signature instead — <code>submitArbiterDecision</code> binds it to exactly the ruling made. A COMPLETE signature can never authorize a REFUNDED payout and vice versa; replay is prevented via <code>usedSignatures</code> and nonce bitmaps.</p>
 </section>
 
-<section id="deploy">
-  <p class="eyebrow">05 · Activity Diagram</p>
-  <h2>Deployment via Trezor + Frame</h2>
-  <p>The hardened flow from <code>scripts/deploy.ts --trezor</code>: every guard aborts before the first transaction, and signing happens exclusively on the device.</p>
-  <div class="panel">
-<pre class="mermaid">
-%%{init: {'theme':'neutral'}}%%
-flowchart TD
-    A([Start: deploy.ts &lt;network&gt; --trezor]) --> B{Frame reachable\non 127.0.0.1:1248?}
-    B -- no --> X1[[Abort: start Frame,\nunlock Trezor]]
-    B -- yes --> C{Frame chain ==\ntarget chain ID?}
-    C -- no --> X2[[Abort: switch the chain\nbadge in Frame]]
-    C -- yes --> D[Deployer = first Frame account\nfee receiver from .env]
-    D --> E[Gas estimate for all deploys]
-    E --> F{Balance ≥\ncost + 20%?}
-    F -- no --> X3[[Abort: insufficient balance]]
-    F -- yes --> G{Confirmation "yes"\nor --yes flag?}
-    G -- no --> X4[[Aborted by operator]]
-    G -- yes --> H[Deploy factory\nconfirm on Trezor]
-    H --> I[Deploy PalindromePay\nfeeReceiver + factory address]
-    I --> J[Wait: 5 confirmations mainnet\n2 testnet]
-    J --> K{Sanity check:\nFEE_RECEIVER and\nWALLET_FACTORY correct on-chain?}
-    K -- no --> X5[[Error + partial record]]
-    K -- yes --> L[Write deployments/&lt;network&gt;.json]
-    L --> M[Etherscan verification]
-    M --> N([Done — commit the record])
-</pre>
-  </div>
-  <p class="footnote">On testnets a test USDT is deployed as the first transaction; on mainnet this is skipped via <code>--escrow-only</code>. If only verification fails: do not redeploy — use the printed <code>--verify-only</code> command instead.</p>
-</section>
-
 <footer>
-  Generated from source · PalindromePay.sol, PalindromePayWalletFactory.sol, PalindromePayWallet.sol, scripts/deploy.ts
+  Generated from source · PalindromePay.sol, PalindromePayWalletFactory.sol, PalindromePayWallet.sol
 </footer>
 
 </div>
