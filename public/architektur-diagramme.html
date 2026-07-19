@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Palindrome Pay – Architektur-Diagramme</title>
+<style>
+  /* Bewusst einthemig auf Nutzerwunsch: weißer Grund, schwarze Schrift,
+     dunkle Rahmen — gilt unabhängig vom Theme-Toggle des Viewers. */
+  :root, :root[data-theme="dark"], :root[data-theme="light"] {
+    --bg: #FFFFFF;
+    --surface: #FFFFFF;
+    --ink: #000000;
+    --muted: #333333;
+    --accent: #000000;
+    --line: #1A1A1A;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    margin: 0;
+  }
+  .wrap {
+    max-width: 1020px;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+  }
+
+  header.doc-head {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+  }
+  .doc-kicker {
+    font-family: var(--mono);
+    font-size: .75rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-size: clamp(1.7rem, 4vw, 2.4rem);
+    line-height: 1.15;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -.015em;
+  }
+  .doc-meta {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem 1.5rem;
+  }
+
+  nav.toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+  }
+  nav.toc a {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--ink);
+    text-decoration: none;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 3px;
+    padding: .35rem .7rem;
+  }
+  nav.toc a:hover, nav.toc a:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent);
+    outline: none;
+  }
+
+  section { display: flex; flex-direction: column; gap: 1rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .75rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+  h2 {
+    font-size: 1.4rem;
+    margin: 0;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+  }
+  section > p {
+    max-width: 65ch;
+    margin: 0;
+    color: var(--muted);
+  }
+  section > p strong { color: var(--ink); }
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: .08em .35em;
+  }
+
+  .panel {
+    background: #FFFFFF;
+    border: 2px solid #1A1A1A;
+    border-radius: 4px;
+    overflow-x: auto;
+    padding: 1.25rem;
+  }
+  .panel pre.mermaid {
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    min-width: 320px;
+  }
+  .footnote {
+    font-size: .85rem;
+    color: var(--muted);
+    max-width: 65ch;
+    margin: 0;
+    border-left: 3px solid var(--accent);
+    padding-left: .9rem;
+  }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.25rem;
+    font-family: var(--mono);
+    font-size: .75rem;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="doc-head">
+  <span class="doc-kicker">Architektur-Dokumentation</span>
+  <h1>Palindrome Pay — UML- &amp; Aktivitätsdiagramme</h1>
+  <div class="doc-meta">
+    <span>contracts/PalindromePay.sol</span>
+    <span>contracts/PalindromePayWalletFactory.sol</span>
+    <span>contracts/PalindromePayWallet.sol</span>
+    <span>Stand: 2026-07-19</span>
+  </div>
+  <nav class="toc" aria-label="Inhalt">
+    <a href="#klassen">01 Klassendiagramm</a>
+    <a href="#zustaende">02 Zustandsdiagramm</a>
+    <a href="#ablauf">03 Aktivität: Escrow-Ablauf</a>
+    <a href="#sequenz">04 Sequenz: 2-of-3-Auszahlung</a>
+    <a href="#deploy">05 Aktivität: Deployment</a>
+  </nav>
+</header>
+
+<section id="klassen">
+  <p class="eyebrow">01 · Strukturdiagramm</p>
+  <h2>Klassendiagramm der drei Kontrakte</h2>
+  <p>Die Architektur trennt <strong>Geschäftslogik</strong> (PalindromePay), <strong>deterministische Wallet-Erzeugung</strong> (Factory, CREATE2) und <strong>Verwahrung der Mittel</strong> (ein Wallet pro Deal). Das Wallet vertraut dem Escrow-Kontrakt nicht blind: Es liest den Deal-Zustand zurück und verlangt bei der Auszahlung eigene, outcome-gebundene EIP-712-Signaturen von 2 der 3 Beteiligten.</p>
+  <div class="panel">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+classDiagram
+    direction LR
+
+    class PalindromePay {
+        +address FEE_RECEIVER «immutable»
+        +IWalletFactory WALLET_FACTORY «immutable»
+        +uint256 nextEscrowId
+        -mapping escrows : id → EscrowDeal
+        -mapping usedSignatures
+        -mapping nonceBitmap
+        +uint256 disputeStatus «Bitmap Beweise»
+        +createEscrow()
+        +createEscrowAndDeposit()
+        +deposit()
+        +acceptEscrow(sellerSig)
+        +confirmDelivery(buyerSig)
+        +confirmDeliverySigned(...)
+        +requestCancel()
+        +cancelByTimeout()
+        +autoRelease()
+        +startDispute()
+        +startDisputeSigned(...)
+        +submitDisputeMessage(ipfs)
+        +submitArbiterDecision(resolution, arbiterSig)
+        +refundAfterDisputeTimeout(buyerSig)
+        +setArbiterSigned(...)
+        +getEscrow() EscrowDeal
+    }
+
+    class PalindromePayWalletFactory {
+        +deploy(escrowId) address
+        +predictWalletAddress(escrow, escrowId) address
+    }
+
+    class PalindromePayWallet {
+        +address ESCROW_CONTRACT «immutable»
+        +uint256 ESCROW_ID «immutable»
+        +bool withdrawn
+        +withdraw()
+        +getValidSignatureCount(outcome)
+        +isSignatureValid(participant, outcome)
+        +getAuthorizationDigest(participant, outcome)
+        -_isAuthorized()
+        -_computeFeeAndNet()
+    }
+
+    class EscrowDeal {
+        «struct»
+        +address token
+        +address buyer
+        +address seller
+        +address arbiter
+        +address wallet
+        +uint256 amount
+        +uint256 maturityTime
+        +State state
+        +uint16 arbiterFeeBps
+        +bytes sellerWalletSig
+        +bytes buyerWalletSig
+        +bytes arbiterWalletSig
+    }
+
+    class State {
+        «enum»
+        AWAITING_PAYMENT
+        AWAITING_DELIVERY
+        DISPUTED
+        COMPLETE
+        REFUNDED
+        CANCELED
+    }
+
+    class Role {
+        «enum»
+        None
+        Buyer
+        Seller
+        Arbiter
+    }
+
+    PalindromePay "1" o-- "n" EscrowDeal : verwaltet
+    EscrowDeal --> State : state
+    PalindromePay ..> Role : Ereignisse
+    PalindromePay --> PalindromePayWalletFactory : WALLET_FACTORY
+    PalindromePayWalletFactory ..> PalindromePayWallet : CREATE2-Deploy pro Deal
+    PalindromePayWallet --> PalindromePay : liest getEscrow(), FEE_RECEIVER()
+</pre>
+  </div>
+  <p class="footnote">Die Signaturen im <code>EscrowDeal</code> werden vom Escrow-Kontrakt nur <em>gesammelt</em> — kryptografisch geprüft werden sie erneut im Wallet beim <code>withdraw()</code>. Jede Signatur bindet sich per <code>PayoutAuthorization</code>-Typehash an genau ein Outcome (COMPLETE = 3, REFUNDED = 4, CANCELED = 5).</p>
+</section>
+
+<section id="zustaende">
+  <p class="eyebrow">02 · Verhaltensdiagramm</p>
+  <h2>Zustandsdiagramm des Escrow-Lebenszyklus</h2>
+  <p>Sechs Zustände, drei davon terminal. Terminale Zustände geben die Mittel frei — wer sie erhält, bestimmt der Zustand selbst: <strong>COMPLETE</strong> zahlt an den Seller (abzüglich 1 % Plattform-Fee, bei Arbiter-Entscheidung zusätzlich Arbiter-Fee), <strong>REFUNDED</strong> und <strong>CANCELED</strong> erstatten dem Buyer den vollen Betrag.</p>
+  <div class="panel">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+stateDiagram-v2
+    [*] --> AWAITING_PAYMENT : createEscrow()
+    [*] --> AWAITING_DELIVERY : createEscrowAndDeposit()
+
+    AWAITING_PAYMENT --> AWAITING_DELIVERY : deposit() — Buyer
+    AWAITING_PAYMENT --> CANCELED : requestCancel() beidseitig / Timeout
+
+    AWAITING_DELIVERY --> COMPLETE : confirmDelivery(buyerSig) — Buyer
+    AWAITING_DELIVERY --> COMPLETE : autoRelease() — Seller, nach maturityTime,\nSeller-Sig vorhanden, kein Dispute/Cancel
+    AWAITING_DELIVERY --> CANCELED : requestCancel() beidseitig /\ncancelByTimeout()
+    AWAITING_DELIVERY --> DISPUTED : startDispute() — Buyer oder Seller
+
+    DISPUTED --> COMPLETE : submitArbiterDecision(COMPLETE)\nBeweise beidseitig oder 30 d + 1 h
+    DISPUTED --> REFUNDED : submitArbiterDecision(REFUNDED)
+    DISPUTED --> REFUNDED : refundAfterDisputeTimeout()\nBuyer, nach 30 d + 1 h ohne Entscheidung
+
+    COMPLETE --> [*] : withdraw() → Seller − 1 % Fee (± Arbiter-Fee)
+    REFUNDED --> [*] : withdraw() → Buyer (voll)
+    CANCELED --> [*] : withdraw() → Buyer (voll)
+</pre>
+  </div>
+  <p class="footnote">Der Arbiter darf erst entscheiden, wenn <em>beide</em> Parteien Beweise eingereicht haben (<code>disputeStatus</code>-Bitmap) — oder ersatzweise nach Ablauf von <code>DISPUTE_LONG_TIMEOUT</code> (30 Tage) + <code>TIMEOUT_BUFFER</code> (1 Stunde). Entscheidet er gar nicht, kann der Buyer sich nach derselben Frist selbst erstatten.</p>
+</section>
+
+<section id="ablauf">
+  <p class="eyebrow">03 · Aktivitätsdiagramm</p>
+  <h2>Escrow-Ablauf: Happy Path und Dispute-Pfad</h2>
+  <p>Der Normalfall kommt ohne Arbiter aus — er wird nur im Streitfall aktiv (und nur dann fällt seine Fee an). Die Wallet-Adresse ist per CREATE2 schon vor dem Deposit deterministisch bekannt.</p>
+  <div class="panel">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart TD
+    A([Buyer/Seller einigen sich auf Deal]) --> B[createEscrow bzw. createEscrowAndDeposit\nToken, Betrag, Frist, optional Arbiter + Fee]
+    B --> C[Wallet-Adresse via CREATE2\ndeterministisch erzeugt]
+    C --> D[Buyer: deposit\nToken fließen in das Deal-Wallet]
+    D --> E[Seller: acceptEscrow\nsigniert Outcome COMPLETE]
+    E --> F{Lieferung /\nLeistung in Ordnung?}
+
+    F -- ja --> G[Buyer: confirmDelivery\nsigniert Outcome COMPLETE]
+    G --> H[[State → COMPLETE]]
+
+    F -- Frist verstrichen,\nBuyer reagiert nicht --> I[Seller: autoRelease\nnach maturityTime]
+    I --> H
+
+    F -- nein --> J[startDispute\nBuyer oder Seller]
+    J --> K[Beide Parteien: submitDisputeMessage\nBeweise als IPFS-Hash]
+    K --> L{Arbiter entscheidet\ninnerhalb 30 Tagen?}
+    L -- ja --> M[submitArbiterDecision\nsigniert exakt das Urteil]
+    M --> N{Urteil}
+    N -- für Seller --> H
+    N -- für Buyer --> O[[State → REFUNDED]]
+    L -- nein --> P[Buyer: refundAfterDisputeTimeout\nnach 30 d + 1 h]
+    P --> O
+
+    F -- beide wollen abbrechen --> Q[requestCancel von Buyer und Seller]
+    Q --> R[[State → CANCELED]]
+
+    H --> S[withdraw am Wallet\n2-of-3-Signaturprüfung]
+    O --> S
+    R --> S
+    S --> T([Auszahlung: COMPLETE → Seller − Fees,\nsonst → Buyer voll])
+</pre>
+  </div>
+</section>
+
+<section id="sequenz">
+  <p class="eyebrow">04 · Sequenzdiagramm</p>
+  <h2>Outcome-gebundene 2-of-3-Auszahlung</h2>
+  <p>Der Kern des Sicherheitsmodells: Kein einzelner Teilnehmer — auch nicht der Escrow-Kontrakt selbst — kann Mittel bewegen. Das Wallet prüft beim <code>withdraw()</code> selbstständig, dass mindestens zwei Teilnehmer <em>genau das eingetretene Outcome</em> signiert haben.</p>
+  <div class="panel">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+sequenceDiagram
+    autonumber
+    actor B as Buyer
+    actor S as Seller
+    participant E as PalindromePay
+    participant W as Deal-Wallet
+    participant T as ERC20-Token
+
+    B->>E: deposit(escrowId)
+    E->>T: transferFrom(Buyer → Wallet)
+    Note over E: State = AWAITING_DELIVERY
+
+    S->>E: acceptEscrow(sellerSig)
+    Note right of E: EIP-712-Sig, Outcome = COMPLETE,\nwird im Deal gespeichert
+
+    B->>E: confirmDelivery(buyerSig)
+    Note right of E: EIP-712-Sig, Outcome = COMPLETE
+    E->>E: _setState(COMPLETE), Payout vorgemerkt
+
+    S->>W: withdraw()
+    W->>E: getEscrow(ESCROW_ID)
+    E-->>W: EscrowDeal (state, Beteiligte, Sigs)
+    W->>W: Prüfe ≥ 2 gültige Sigs\nfür Outcome COMPLETE
+    W->>T: transfer(1 % → FEE_RECEIVER)
+    W->>T: transfer(Rest → Seller)
+    Note over W: withdrawn = true,\nWallet muss leer sein
+</pre>
+  </div>
+  <p class="footnote">Im Dispute-Fall liefert stattdessen der Arbiter die zweite Signatur — <code>submitArbiterDecision</code> bindet sie an genau das gefällte Urteil. Eine COMPLETE-Signatur kann niemals eine REFUNDED-Auszahlung autorisieren und umgekehrt; Replay wird über <code>usedSignatures</code> und Nonce-Bitmaps verhindert.</p>
+</section>
+
+<section id="deploy">
+  <p class="eyebrow">05 · Aktivitätsdiagramm</p>
+  <h2>Deployment via Trezor + Frame</h2>
+  <p>Der gehärtete Ablauf aus <code>scripts/deploy.ts --trezor</code>: Jede Guard bricht vor der ersten Transaktion ab, signiert wird ausschließlich auf dem Gerät.</p>
+  <div class="panel">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart TD
+    A([Start: deploy.ts &lt;netz&gt; --trezor]) --> B{Frame erreichbar\nauf 127.0.0.1:1248?}
+    B -- nein --> X1[[Abbruch: Frame starten,\nTrezor entsperren]]
+    B -- ja --> C{Frame-Chain ==\nZiel-Chain-ID?}
+    C -- nein --> X2[[Abbruch: Chain-Badge\nin Frame umstellen]]
+    C -- ja --> D[Deployer = erster Frame-Account\nFee Receiver aus .env]
+    D --> E[Gas-Schätzung aller Deploys]
+    E --> F{Balance ≥\nKosten + 20 %?}
+    F -- nein --> X3[[Abbruch: Insufficient balance]]
+    F -- ja --> G{Bestätigung „yes"\noder --yes-Flag?}
+    G -- nein --> X4[[Abbruch durch Operator]]
+    G -- ja --> H[Deploy Factory\nBestätigung auf Trezor]
+    H --> I[Deploy PalindromePay\nfeeReceiver + Factory-Adresse]
+    I --> J[Warten: 5 Confirmations Mainnet\n2 Testnet]
+    J --> K{Sanity-Check:\nFEE_RECEIVER und\nWALLET_FACTORY on-chain korrekt?}
+    K -- nein --> X5[[Fehler + partial-Record]]
+    K -- ja --> L[deployments/&lt;netz&gt;.json schreiben]
+    L --> M[Etherscan-Verifikation]
+    M --> N([Fertig — Record committen])
+</pre>
+  </div>
+  <p class="footnote">Auf Testnetzen wird zusätzlich der Test-USDT als erste Transaktion deployt; auf Mainnet entfällt das per <code>--escrow-only</code>. Schlägt nur die Verifikation fehl: nicht neu deployen, sondern den ausgegebenen <code>--verify-only</code>-Befehl nutzen.</p>
+</section>
+
+<footer>
+  Erstellt aus dem Quellcode · PalindromePay.sol, PalindromePayWalletFactory.sol, PalindromePayWallet.sol, scripts/deploy.ts
+</footer>
+
+</div>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+</script>
+</body>
+</html>
