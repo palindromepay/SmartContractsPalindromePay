@@ -551,7 +551,7 @@ contract PalindromePay is ReentrancyGuard {
         bytes32 s;
         uint8 v;
 
-        assembly {
+        assembly ("memory-safe") {
             r := calldataload(add(signature.offset, 0))
             s := calldataload(add(signature.offset, 32))
             v := byte(0, calldataload(add(signature.offset, 64)))
@@ -582,7 +582,7 @@ contract PalindromePay is ReentrancyGuard {
         if (signature.length != 65) revert SignatureLengthInvalid();
         bytes32 s;
         uint8 v;
-        assembly {
+        assembly ("memory-safe") {
             s := calldataload(add(signature.offset, 32))
             v := byte(0, calldataload(add(signature.offset, 64)))
         }
@@ -594,13 +594,13 @@ contract PalindromePay is ReentrancyGuard {
     }
 
     /// @dev Verifies a wallet authorization signature
-    /// @param signature The 65-byte signature
+    /// @param signature The 65-byte signature (memory, so stored sigs can be re-verified)
     /// @param escrowId The escrow ID
     /// @param walletAddr The wallet address (can be predicted)
     /// @param expectedSigner The address that should have signed
     /// @return True if signature is valid
     function _verifyWalletSignature(
-        bytes calldata signature,
+        bytes memory signature,
         uint256 escrowId,
         address walletAddr,
         address expectedSigner,
@@ -613,10 +613,10 @@ contract PalindromePay is ReentrancyGuard {
         bytes32 s;
         uint8 v;
 
-        assembly {
-            r := calldataload(add(signature.offset, 0))
-            s := calldataload(add(signature.offset, 32))
-            v := byte(0, calldataload(add(signature.offset, 64)))
+        assembly ("memory-safe") {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
         }
 
         // Check s is in lower half of curve order (EIP-2)
@@ -739,6 +739,22 @@ contract PalindromePay is ReentrancyGuard {
     function _validateArbiterFee(address arbiter, uint16 arbiterFeeBps) internal pure {
         require(arbiterFeeBps <= MAX_ARBITER_FEE_BPS, "Arbiter fee too high");
         require(arbiter != address(0) || arbiterFeeBps == 0, "Fee needs arbiter");
+    }
+
+    /// @dev True for plain EOAs and EIP-7702 delegated EOAs (e.g. MetaMask Smart
+    ///      Accounts); false for deployed contracts. A 7702 delegation designator
+    ///      is exactly 23 bytes: 0xef0100 ++ 20-byte delegate address. Deployed
+    ///      contract code can never start with 0xEF (EIP-3541), so the prefix
+    ///      check cannot be spoofed by a contract. 7702 accounts keep their
+    ///      private key, so ECDSA-based arbiter signatures keep working.
+    /// @param account The address to check
+    function _isEoaLike(address account) internal view returns (bool) {
+        uint256 size = account.code.length; // EXTCODESIZE only, no copy
+        if (size == 0) return true;
+        if (size != 23) return false;
+        // Only reached for exactly-23-byte code, so this copies just 23 bytes.
+        bytes memory code = account.code;
+        return code[0] == 0xef && code[1] == 0x01 && code[2] == 0x00;
     }
 
     /// @dev Calculates fee and net amount for payouts
@@ -870,7 +886,7 @@ contract PalindromePay is ReentrancyGuard {
         require(amount >= minimumAmount, "Amount too small");
 
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
-        require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
+        require(arbiter == address(0) || _isEoaLike(arbiter), "Arbiter must be EOA");
         require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
         _validateArbiterFee(arbiter, arbiterFeeBps);
 
@@ -954,7 +970,7 @@ contract PalindromePay is ReentrancyGuard {
         require(amount >= minimumAmount, "Amount too small");
 
         require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
-        require(arbiter == address(0) || arbiter.code.length == 0, "Arbiter must be EOA");
+        require(arbiter == address(0) || _isEoaLike(arbiter), "Arbiter must be EOA");
         require(arbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
         _validateArbiterFee(arbiter, arbiterFeeBps);
 
@@ -1123,7 +1139,14 @@ contract PalindromePay is ReentrancyGuard {
             deal.state == State.AWAITING_DELIVERY,
             "Not awaiting delivery"
         );
-        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
+        // The stored seller sig must authorize COMPLETE, not merely exist: after
+        // requestCancel it is CANCELED-bound, and entering COMPLETE with it would
+        // leave the wallet permanently unwithdrawable. Seller can re-arm a
+        // COMPLETE sig via acceptEscrow.
+        require(
+            _verifyWalletSignature(deal.sellerWalletSig, escrowId, deal.wallet, deal.seller, State.COMPLETE),
+            "Seller sig not for release"
+        );
 
         // Verify buyer signature (wallet already exists). Confirming delivery
         // authorizes the COMPLETE payout to the seller.
@@ -1270,7 +1293,12 @@ contract PalindromePay is ReentrancyGuard {
 
         require(block.timestamp > deal.maturityTime, "Maturity not reached");
 
-        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
+        // Outcome-bound check: a CANCELED-bound sig left by the seller's own
+        // requestCancel must not release into COMPLETE (permanent fund lock).
+        require(
+            _verifyWalletSignature(deal.sellerWalletSig, escrowId, deal.wallet, deal.seller, State.COMPLETE),
+            "Seller sig not for release"
+        );
 
         _setState(escrowId, State.COMPLETE);
 
@@ -1329,7 +1357,7 @@ contract PalindromePay is ReentrancyGuard {
             newArbiter != deal.buyer && newArbiter != deal.seller,
             "Invalid arbiter"
         );
-        require(newArbiter.code.length == 0, "Arbiter must be EOA");
+        require(_isEoaLike(newArbiter), "Arbiter must be EOA");
         require(newArbiter != FEE_RECEIVER, "Arbiter cannot be fee receiver");
         _validateArbiterFee(newArbiter, arbiterFeeBps);
 
@@ -1556,7 +1584,12 @@ contract PalindromePay is ReentrancyGuard {
         require(buyerWalletSig.length == 65, "Missing buyer sig");
         _validateSignatureFormat(buyerWalletSig);
 
-        require(deal.sellerWalletSig.length == 65, "Missing seller sig");
+        // Outcome-bound check (see confirmDelivery): stored seller sig must
+        // authorize COMPLETE, not merely exist.
+        require(
+            _verifyWalletSignature(deal.sellerWalletSig, escrowId, deal.wallet, deal.seller, State.COMPLETE),
+            "Seller sig not for release"
+        );
 
         bytes32 structHash = keccak256(
             abi.encode(

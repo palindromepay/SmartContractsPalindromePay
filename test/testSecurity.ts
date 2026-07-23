@@ -1669,6 +1669,163 @@ test('SECURITY: setArbiter - both signatures must cover the same fee', async () 
     console.log('   ✅ Diverging fee signatures rejected');
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// FUND-LOCK REGRESSION
+// A stored seller signature is outcome-bound. requestCancel overwrites the
+// seller's COMPLETE-bound sig with a CANCELED-bound one; any transition into
+// COMPLETE that only checks sig *presence* would then produce a terminal state
+// whose payout can never be authorized — funds locked forever.
+// ────────────────────────────────────────────────────────────────────────────
+
+async function increaseTime(seconds: number) {
+    await publicClient.transport.request({ method: 'evm_increaseTime', params: [seconds] });
+    await publicClient.transport.request({ method: 'evm_mine', params: [] });
+}
+
+/** Seller creates (COMPLETE sig) + buyer deposits + seller requests cancel (CANCELED sig). */
+async function setupEscrowWithStaleSellerSig(): Promise<{ escrowId: number; deal: any }> {
+    await fundAndApprove(buyerClient, buyer.address);
+    const escrowId = await getNextEscrowId();
+    const predictedWallet = computePredictedWallet(escrowId);
+
+    const sellerSig = await signWalletAuthorization(sellerClient, seller.address, predictedWallet, escrowId);
+    await sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'createEscrow',
+        args: [tokenAddress, buyer.address, AMOUNT, 1n, arbiter.address, 0, 'Fund lock PoC', 'QmFundLock', sellerSig],
+    });
+    const deal = await getDeal(escrowId);
+
+    const buyerSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'deposit',
+        args: [BigInt(escrowId), buyerSig],
+    });
+
+    const sellerCancelSig = await signWalletAuthorization(
+        sellerClient, seller.address, deal.wallet, escrowId, State.CANCELED,
+    );
+    await sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'requestCancel',
+        args: [BigInt(escrowId), sellerCancelSig],
+    });
+
+    return { escrowId, deal };
+}
+
+/** Pre-fix bug demonstration: terminal COMPLETE state that nobody can withdraw. */
+async function assertFundsPermanentlyLocked(escrowId: number, via: string) {
+    const locked = await getDeal(escrowId);
+    assert.equal(locked.state, State.COMPLETE, 'escrow reached COMPLETE with a stale seller sig');
+    for (const client of [sellerClient, buyerClient]) {
+        await assert.rejects(
+            client.writeContract({ address: locked.wallet, abi: walletAbi, functionName: 'withdraw', args: [] }),
+            (e: any) => /InsufficientSignatures|revert/.test(e.message),
+        );
+    }
+    assert.fail(
+        `FUND LOCK via ${via}: escrow entered COMPLETE while the stored seller sig is CANCELED-bound; ` +
+        'neither party can ever withdraw and there is no re-sign or admin path',
+    );
+}
+
+test('SECURITY: Fund-lock regression - confirmDelivery rejects stale CANCELED-bound seller sig', async () => {
+    console.log('\n🔒 FUND-LOCK: seller requestCancel → buyer confirmDelivery');
+    const { escrowId, deal } = await setupEscrowWithStaleSellerSig();
+
+    const buyerConfirmSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+    try {
+        await buyerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'confirmDelivery',
+            args: [BigInt(escrowId), buyerConfirmSig],
+        });
+    } catch (error: any) {
+        assert.ok(
+            error.message.includes('Seller sig not for release') || error.message.includes('revert'),
+            'confirmDelivery must revert while the stored seller sig is CANCELED-bound',
+        );
+        console.log('   ✅ confirmDelivery rejected stale CANCELED-bound seller sig');
+        return;
+    }
+    await assertFundsPermanentlyLocked(escrowId, 'confirmDelivery');
+});
+
+test('SECURITY: Fund-lock regression - confirmDeliverySigned rejects stale CANCELED-bound seller sig', async () => {
+    console.log('\n🔒 FUND-LOCK: seller requestCancel → relayed confirmDeliverySigned');
+    const { escrowId, deal } = await setupEscrowWithStaleSellerSig();
+
+    const freshDeal = await getDeal(escrowId);
+    const deadline = (await getBlockTimestamp()) + 3600n;
+    const coordSig = await signConfirmDelivery(buyerClient, buyer.address, escrowId, freshDeal, deadline, 0n);
+    const buyerWalletSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+
+    try {
+        await ownerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'confirmDeliverySigned',
+            args: [BigInt(escrowId), coordSig, deadline, 0n, buyerWalletSig],
+        });
+    } catch (error: any) {
+        assert.ok(
+            error.message.includes('Seller sig not for release') || error.message.includes('revert'),
+            'confirmDeliverySigned must revert while the stored seller sig is CANCELED-bound',
+        );
+        console.log('   ✅ confirmDeliverySigned rejected stale CANCELED-bound seller sig');
+        return;
+    }
+    await assertFundsPermanentlyLocked(escrowId, 'confirmDeliverySigned');
+});
+
+test('SECURITY: Fund-lock regression - autoRelease rejects stale CANCELED-bound seller sig', async () => {
+    console.log('\n🔒 FUND-LOCK: seller requestCancel → maturity passes → seller autoRelease');
+    const { escrowId } = await setupEscrowWithStaleSellerSig();
+
+    const ONE_DAY = 24 * 60 * 60;
+    await increaseTime(ONE_DAY + 100);
+
+    try {
+        await sellerClient.writeContract({
+            address: escrowAddress, abi: escrowAbi, functionName: 'autoRelease',
+            args: [BigInt(escrowId)],
+        });
+    } catch (error: any) {
+        assert.ok(
+            error.message.includes('Seller sig not for release') || error.message.includes('revert'),
+            'autoRelease must revert while the stored seller sig is CANCELED-bound',
+        );
+        console.log('   ✅ autoRelease rejected stale CANCELED-bound seller sig');
+        return;
+    }
+    await assertFundsPermanentlyLocked(escrowId, 'autoRelease');
+});
+
+test('SECURITY: Fund-lock recovery - seller re-arms COMPLETE sig via acceptEscrow, delivery then succeeds', async () => {
+    console.log('\n🔓 FUND-LOCK RECOVERY: seller re-signs COMPLETE via acceptEscrow');
+    const { escrowId, deal } = await setupEscrowWithStaleSellerSig();
+
+    // Seller changes their mind: re-attach a COMPLETE-bound sig while still AWAITING_DELIVERY
+    const sellerCompleteSig = await signWalletAuthorization(sellerClient, seller.address, deal.wallet, escrowId);
+    await sellerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'acceptEscrow',
+        args: [BigInt(escrowId), sellerCompleteSig],
+    });
+
+    const buyerConfirmSig = await signWalletAuthorization(buyerClient, buyer.address, deal.wallet, escrowId);
+    await buyerClient.writeContract({
+        address: escrowAddress, abi: escrowAbi, functionName: 'confirmDelivery',
+        args: [BigInt(escrowId), buyerConfirmSig],
+    });
+
+    const final = await getDeal(escrowId);
+    assert.equal(final.state, State.COMPLETE, 'Should be COMPLETE');
+
+    const sellerBefore = await getBalance(seller.address);
+    await sellerClient.writeContract({
+        address: final.wallet, abi: walletAbi, functionName: 'withdraw', args: [],
+    });
+    const sellerAfter = await getBalance(seller.address);
+    assert.equal(sellerAfter - sellerBefore, AMOUNT - AMOUNT / 100n, 'Seller receives net amount');
+    console.log('   ✅ Re-armed escrow completed and withdrew normally');
+});
+
 test('Security Test Summary', async () => {
     console.log('\n═══════════════════════════════════════════════════════════════');
     console.log('                 SECURITY TEST SUMMARY');
