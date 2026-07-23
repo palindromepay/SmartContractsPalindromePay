@@ -1,0 +1,23 @@
+{
+  "network": "base-test",
+  "chainId": 84532,
+  "status": "deployed",
+  "deployer": "0xACbA20EC269B5490D82A59e8664eF6f1e7868526",
+  "feeReceiver": "0xf20127f4D296585F51f8BaDfe309A813dE406770",
+  "signer": "private-key",
+  "timestamp": "2026-07-23T12:34:33.043Z",
+  "gitCommit": "208610051620e85477e658b49a6a37131da79f58",
+  "contracts": {
+    "factory": {
+      "address": "0x99c62067e7ffd207ba9e16ae5d92a1f994735c90",
+      "blockNumber": "44520888",
+      "txHash": "0xf7a219bead4c4e82db6572b56c7e4568a233d463cb4bcf0b5611e0c027d743b7"
+    },
+    "escrow": {
+      "address": "0x3b1c5e0011a51c9d7fd5adbb9e8b44b374dee296",
+      "blockNumber": "44520891",
+      "txHash": "0x9863d5927893ac31f9c0acfc1a3a2ca04618559a9307f8f24ec9c34bdfc47d05"
+    }
+  },
+  "startBlock": "44520891"
+}

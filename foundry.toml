@@ -1,13 +1,36 @@
-# Foundry config — used ONLY so Slither can compile via `forge` (which supports
-# viaIR) instead of the Hardhat-3 path that crytic-compile cannot parse.
+# Foundry config — serves two purposes:
+#   1. Slither compiles via `forge` (which supports viaIR) instead of the
+#      Hardhat-3 path that crytic-compile cannot parse.
+#   2. The invariant/fuzz suite under test/foundry/ (run with `forge test`).
 # Hardhat ignores this file; the primary toolchain remains hardhat.config.ts.
-# Settings mirror hardhat.config.ts so Slither analyzes the same AST/bytecode.
+# Compiler settings mirror hardhat.config.ts so Slither and the invariant
+# suite analyze the same AST/bytecode.
 [profile.default]
 src = "contracts"
 out = "out"
+test = "test/foundry"
 libs = ["node_modules"]
 solc = "0.8.29"
 evm_version = "cancun"
 optimizer = true
 via_ir = true
-remappings = ["@openzeppelin/=node_modules/@openzeppelin/"]
+# Test-harness gas budget only (handler ghost-sync is O(n^2) over escrows);
+# irrelevant for on-chain limits.
+gas_limit = "18446744073709551615"
+remappings = [
+    "@openzeppelin/=node_modules/@openzeppelin/",
+    "forge-std/=node_modules/forge-std/src/",
+]
+
+[profile.default.invariant]
+runs = 256
+depth = 50
+# Handler actions never revert (expected contract reverts are caught and
+# counted); any revert that bubbles up is a real finding.
+fail_on_revert = true
+
+# One-off deep campaign: FOUNDRY_PROFILE=deep forge test
+[profile.deep.invariant]
+runs = 1000
+depth = 100
+fail_on_revert = true
